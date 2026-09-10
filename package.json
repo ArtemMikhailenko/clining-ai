@@ -1,0 +1,22 @@
+{
+  "name": "wa-admin",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node --env-file-if-exists=.env src/server.js",
+    "reset": "sh scripts-reset.sh"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "type": "module",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.124.0",
+    "baileys": "^7.0.0-rc14",
+    "express": "^5.2.1",
+    "qrcode": "^1.5.4",
+    "zod": "^4.5.4"
+  }
+}

@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Симулятор клиента</title>
+<style>
+  body{margin:0;background:#0b141a;color:#e9edef;font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+       height:100vh;display:flex;align-items:center;justify-content:center}
+  .phone{width:min(420px,96vw);height:min(760px,96vh);display:flex;flex-direction:column;
+         background:#0b141a;border:1px solid #222d34;border-radius:18px;overflow:hidden}
+  .hd{background:#202c33;padding:10px 14px;display:flex;gap:10px;align-items:center}
+  .hd input{background:#0b141a;border:1px solid #2a3942;color:#e9edef;border-radius:8px;padding:6px 9px;font:inherit;width:150px}
+  .hd b{font-size:14px}
+  .chat{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:8px;
+        background:#0b141a url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='40' height='40'%3E%3Ccircle cx='4' cy='4' r='1' fill='%23131d24'/%3E%3C/svg%3E")}
+  .m{max-width:80%;padding:7px 11px;border-radius:9px;white-space:pre-wrap;word-wrap:break-word;font-size:14.5px;text-align:start}
+  .me{align-self:flex-end;background:#005c4b}
+  .them{align-self:flex-start;background:#202c33}
+  .sys{align-self:center;color:#8696a0;font-size:12px}
+  .cp{display:flex;gap:8px;padding:10px;background:#202c33}
+  .cp input{flex:1;background:#2a3942;border:0;color:#e9edef;border-radius:20px;padding:10px 14px;font:inherit}
+  .cp button{background:#00a884;border:0;color:#06231b;border-radius:20px;padding:0 18px;font:inherit;font-weight:600;cursor:pointer}
+  .clip{display:flex;align-items:center;padding:0 6px;font-size:20px;cursor:pointer;opacity:.75}
+  .clip:hover{opacity:1}
+  .clip.armed{opacity:1;filter:drop-shadow(0 0 5px #00a884)}
+  .m img,.m video{display:block;max-width:220px;border-radius:6px;margin-bottom:5px}
+  .cp button:disabled{opacity:.5}
+</style>
+</head>
+<body>
+<div class="phone">
+  <div class="hd">
+    <b>Клиент</b>
+    <input id="phone" value="380671234567" title="номер клиента">
+    <input id="name" value="Игорь" title="имя" style="width:90px">
+  </div>
+  <div class="chat" id="chat"><div class="sys">Напиши как клиент — сообщение попадёт в админку, ИИ ответит здесь же.</div></div>
+  <form class="cp" id="form">
+    <label class="clip" title="Прикрепить фото или видео">📎
+      <input type="file" id="file" accept="image/*,video/*" hidden>
+    </label>
+    <input id="inp" dir="auto" placeholder="Сообщение" autocomplete="off" autofocus>
+    <button id="send" type="submit">→</button>
+  </form>
+</div>
+<script>
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s ?? '').replace(/[&<>]/g, (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;' }[c]));
+let convId = null;
+
+function render(messages) {
+  $('#chat').innerHTML = messages.map((m) => {
+    if (m.author === 'system') return `<div class="sys">${esc(m.body)}</div>`;
+    const media = (m.media ? JSON.parse(m.media) : []).map((it) =>
+      it.kind === 'video'
+        ? `<video src="/media/${esc(it.file)}" controls preload="metadata"></video>`
+        : `<img src="/media/${esc(it.file)}" alt="фото">`).join('');
+    return `<div class="m ${m.author === 'customer' ? 'me' : 'them'}" dir="auto">${media}${esc(m.body)}</div>`;
+  }).join('');
+  $('#chat').scrollTop = 1e9;
+}
+
+let pending = null;   // выбранное фото ждёт отправки вместе с текстом
+
+$('#file').onchange = () => {
+  const f = $('#file').files[0];
+  if (!f) return;
+  const fr = new FileReader();
+  fr.onload = () => { pending = fr.result; $('.clip').classList.add('armed'); $('#inp').focus(); };
+  fr.readAsDataURL(f);
+};
+
+async function send() {
+  const text = $('#inp').value.trim();
+  if (!text && !pending) return;
+  $('#send').disabled = true;
+  $('#inp').value = '';
+  try {
+    const res = await fetch('/api/sim/incoming', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from: $('#phone').value.trim(), name: $('#name').value.trim(), text, image: pending })
+    });
+    if (!res.ok) throw new Error('сервер вернул ' + res.status);
+    const r = await res.json();
+    convId = r.conv_id;
+    pending = null;
+    $('.clip').classList.remove('armed');
+    $('#file').value = '';
+    render(r.messages || []);
+  } catch (e) {
+    // без finally кнопка залипала навсегда и написать было нельзя
+    $('#chat').insertAdjacentHTML('beforeend', `<div class="sys">Ошибка: ${esc(e.message)}</div>`);
+    $('#chat').scrollTop = 1e9;
+  } finally {
+    $('#send').disabled = false;
+    $('#inp').focus();
+  }
+}
+
+// нативный submit: Enter на десктопе и «Go» на мобильной клавиатуре
+$('#form').onsubmit = (e) => { e.preventDefault(); send(); };
+
+// живые обновления, когда менеджер отвечает из админки
+const es = new EventSource('/api/events');
+es.addEventListener('message', async (e) => {
+  const d = JSON.parse(e.data || '{}');
+  if (!convId || d.conv_id !== convId) return;
+  const c = await fetch('/api/conversations/' + convId).then((r) => r.json());
+  render(c.messages);
+});
+</script>
+</body>
+</html>
