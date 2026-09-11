@@ -31,8 +31,10 @@ function pickGreeting(text) {
     const m = /^([a-z]{2}):\s*(.+)$/i.exec(line);
     if (m) map.set(m[1].toLowerCase(), m[2]);
   }
-  if (!map.size) return raw;                       // одна строка без префикса — как есть
-  return map.get(detectLang(text)) ?? map.get('ru') ?? [...map.values()][0];
+  // {company} в тексте приветствия — название компании из настроек
+  const fill = (s) => s.replaceAll('{company}', getSetting('company') || '');
+  if (!map.size) return fill(raw);                 // одна строка без префикса — как есть
+  return fill(map.get(detectLang(text)) ?? map.get('ru') ?? [...map.values()][0]);
 }
 
 /** Можно ли назначить уборку на эту дату: рабочий день и не праздник. */
@@ -141,10 +143,14 @@ async function respond(convId, ch, text) {
   }
 
   const lead = { ...JSON.parse(fresh.lead || '{}'), ...Object.fromEntries(Object.entries(out.lead || {}).filter(([, v]) => v)) };
+  // Готовая заявка — без адреса это не заявка, даже если модель поспешила
+  const ready = out.lead_ready && Boolean(lead.district || lead.address);
+  if (ready) lead.stage = 'заявка готова';
   db.prepare('UPDATE conversations SET lead=?, summary=?, status=CASE WHEN status=\'new\' THEN \'ai\' ELSE status END WHERE id=?')
     .run(JSON.stringify(lead), out.summary || fresh.summary, conv.id);
 
   if (out.needs_human) flagHuman(conv.id, out.handoff_reason || 'ИИ передал диалог');
+  else if (ready) flagHuman(conv.id, 'заявка готова — посмотреть видео и назвать цену');
 
   const replies = [...(out.replies ?? [])];
 

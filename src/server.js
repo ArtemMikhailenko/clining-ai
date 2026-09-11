@@ -219,7 +219,7 @@ app.post('/api/conversations/:id/suggest', async (req, res) => {
  * и не слышит того, что сказали по телефону, — последнее слово за менеджером.
  */
 const LEAD_FIELDS = ['name', 'service', 'object_type', 'area_m2', 'rooms_count', 'bathrooms',
-  'district', 'date', 'date_iso', 'time', 'windows', 'condition', 'price_quote', 'stage'];
+  'district', 'address', 'works', 'date', 'date_iso', 'time', 'windows', 'condition', 'price_quote', 'stage'];
 
 app.post('/api/conversations/:id/lead', (req, res) => {
   const id = Number(req.params.id);

@@ -20,14 +20,19 @@ const toMessage = (t) => ({
     : t.text
 });
 
-export async function complete({ system, turns, schema }) {
+export async function complete({ system, context = '', turns, schema }) {
   client ??= new Anthropic();
 
   const res = await client.messages.parse({
     model: MODEL,
     max_tokens: supportsEffort ? 8000 : 2000,
-    cache_control: { type: 'ephemeral' },   // системный промпт одинаков во всех запросах
-    system,
+    // автокэш переписки плюс явная точка кэша на постоянной части промпта:
+    // её кэш переживает смену времени и данных заявки в блоке context
+    cache_control: { type: 'ephemeral' },
+    system: [
+      { type: 'text', text: system, cache_control: { type: 'ephemeral' } },
+      ...(context ? [{ type: 'text', text: context }] : [])
+    ],
     messages: turns.map(toMessage),
     output_config: {
       ...(supportsEffort ? { effort: EFFORT } : {}),

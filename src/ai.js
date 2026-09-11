@@ -1,9 +1,9 @@
 import { z } from 'zod';
 import { getSetting } from './db.js';
-import { asImage } from './media.js';
+import { asImages } from './media.js';
 import { detectLang, LANG_NAME } from './lang.js';
 import { quoteHint } from './pricing.js';
-import { scheduleSetting, scheduleText } from './schedule.js';
+import { scheduleSetting, scheduleText, workHours, isHoliday } from './schedule.js';
 import * as anthropic from './providers/anthropic.js';
 import * as openai from './providers/openai.js';
 
@@ -17,18 +17,21 @@ export const aiLabel = () => (provider.configured() ? provider.label() : 'заг
 const Lead = z.object({
   name: z.string(),
   service: z.enum(['', 'после ремонта', 'перед въездом', 'после выезда', 'генеральная', 'поддерживающая']),
-  object_type: z.string(),        // квартира / дом / офис
+  object_type: z.string(),        // квартира / дом / офис / коммерческое помещение
   area_m2: z.string(),
   rooms_count: z.string(),        // сколько комнат
   bathrooms: z.string(),          // сколько санузлов
-  district: z.string(),
+  district: z.string(),           // город и район
+  address: z.string(),            // улица, этаж, лифт — если клиент сам назвал
+  works: z.string(),              // что сделать сверх уборки: полировка пола, окна, трисы, краска, шпаклёвка
   date: z.string(),               // как сказал клиент: «в субботу», «завтра»
   date_iso: z.string(),           // та же дата в виде ГГГГ-ММ-ДД, посчитанная от сегодняшней
   time: z.string(),               // ЧЧ:ММ, если названо время
   windows: z.enum(['', 'да', 'нет']),
   condition: z.enum(['', 'лёгкое', 'среднее', 'сильное', 'после ремонта']),
   price_quote: z.string(),        // что назвали клиенту
-  stage: z.enum(['', 'новый', 'уточняем', 'назвали цену', 'готов к заказу', 'дата согласована', 'отказ'])
+  stage: z.enum(['', 'новый', 'уточняем', 'ждём видео', 'заявка готова', 'назвали цену',
+    'готов к заказу', 'дата согласована', 'отказ'])
 });
 
 const Answer = z.object({
@@ -36,6 +39,8 @@ const Answer = z.object({
   // а не один абзац на пять строк
   messages: z.array(z.string()),
   needs_human: z.boolean(),
+  // заявка собрана, и в этом же ответе клиенту сказано, что её передают коллеге
+  lead_ready: z.boolean(),
   handoff_reason: z.string(),
   summary: z.string(),
   lead: Lead,
@@ -52,6 +57,7 @@ function stubReply(turns) {
       ? ['Секунду, подключаю менеджера.']
       : ['Здравствуйте! Это демо-ответ — ключ ИИ не задан.'],
     needs_human: wantsHuman,
+    lead_ready: false,
     handoff_reason: wantsHuman ? 'клиент просит человека' : '',
     summary: (turns.at(-1)?.text || '').slice(0, 90),
     lead: {}
@@ -64,6 +70,7 @@ function stubReply(turns) {
  * первым обязательно должен идти user.
  */
 const MAX_IMAGES = 6;   // больше в один запрос слать незачем: дорого и без пользы
+const MAX_FRAMES = 8;   // картинок всего в запросе: из одного видео берём до 4 кадров
 
 async function toTurns(messages) {
   // Картинки прикладываем только те, что пришли ПОСЛЕ нашего последнего ответа.
@@ -80,6 +87,7 @@ async function toTurns(messages) {
   );
 
   const turns = [];
+  let sent = 0;
   for (const m of messages) {
     if (m.author === 'system') continue;
     const role = m.direction === 'in' ? 'user' : 'assistant';
@@ -88,9 +96,14 @@ async function toTurns(messages) {
     const images = [];
     if (m.media) {
       for (const item of JSON.parse(m.media)) {
-        const img = withImages.has(m.id) ? await asImage(item) : null;
-        if (img) images.push(img);
-        else text = (text ? text + '\n' : '') + `[клиент прислал ${item.kind === 'video' ? 'видео' : 'фото'}]`;
+        const kind = item.kind === 'video' ? 'видео' : 'фото';
+        const imgs = withImages.has(m.id) && sent < MAX_FRAMES
+          ? (await asImages(item)).slice(0, MAX_FRAMES - sent) : [];
+        sent += imgs.length;
+        images.push(...imgs);
+        // модель должна понимать, что кадры — из одного ролика, а не пачка разных фото
+        const note = imgs.length && item.kind === 'video' ? '[клиент прислал видео, ниже кадры из него]' : `[клиент прислал ${kind}]`;
+        text = (text ? text + '\n' : '') + note;
       }
     }
 
@@ -103,6 +116,25 @@ async function toTurns(messages) {
   }
   while (turns.length && turns[0].role !== 'user') turns.shift();
   return turns;
+}
+
+const ON_DAY = ['в воскресенье', 'в понедельник', 'во вторник', 'в среду', 'в четверг', 'в пятницу', 'в субботу'];
+
+/** Когда коллеги снова на связи: «завтра с 08:00» звучит по-человечески, «в рабочие часы» — нет. */
+function nextOpening(tz) {
+  const hours = workHours();
+  const now = new Date();
+  const hm = new Intl.DateTimeFormat('en-GB', { timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false }).format(now);
+  for (let i = 0; i < 8; i++) {
+    const d = new Date(now.getTime() + i * 864e5);
+    const iso = new Intl.DateTimeFormat('sv-SE', { timeZone: tz }).format(d);
+    const wd = new Date(iso + 'T12:00:00Z').getUTCDay();
+    const h = hours[wd];
+    if (!Array.isArray(h) || isHoliday(iso)) continue;
+    if (i === 0 && hm >= h[0]) continue;            // сегодня уже открывались
+    return `${i === 0 ? 'сегодня' : i === 1 ? 'завтра' : ON_DAY[wd]} с ${h[0]}`;
+  }
+  return 'в рабочее время';
 }
 
 export async function generateReply(conv, messages, opts = {}) {
@@ -133,42 +165,72 @@ export async function generateReply(conv, messages, opts = {}) {
 
   const priceLine = quoteHint(JSON.parse(conv.lead || '{}'));
   const facts = (getSetting('business_facts') || '').trim();
+  const media = messages.flatMap((m) => (m.direction === 'in' && m.media ? JSON.parse(m.media) : []));
+  const videos = media.filter((x) => x.kind === 'video').length;
+  const photos = media.length - videos;
+  // приветствие код шлёт сам; модель его не видит и без подсказки здоровается второй раз
+  const firstReply = !messages.some((m) => m.direction === 'out' && m.author !== 'system');
+
+  // Постоянная часть: промпт, график, условия и правила ответа. Она одинакова во всех
+  // запросах и кэшируется провайдером — повторное чтение стоит десятую часть цены.
+  // Всё изменчивое (время, язык, данные заявки) идёт отдельным блоком после неё:
+  // раньше время с минутами стояло посередине промпта и сбрасывало кэш каждую минуту.
   const system = [
     getSetting('system_prompt'),
     '',
-    `ОТВЕЧАЙ НА ${lang.toUpperCase()} ЯЗЫКЕ. Каждое сообщение — только на ${lang}.`,
-    // график берём из настроек, а не из свободного текста: иначе бот
-    // обещает клиентам расписание, которого уже нет
     scheduleText(),
-    opts.offHours
-      ? 'СЕЙЧАС НЕРАБОЧЕЕ ВРЕМЯ. Отвечай как обычно, но в одном из сообщений коротко скажи так: '
-        + `«${opts.offHoursNote}» Не повторяй это в каждом сообщении.`
-      : '',
     '',
+    facts ? 'УСЛОВИЯ И ЦЕНЫ (только эти, ничего не придумывай):\n' + facts : '',
+    '',
+    'ФОРМАТ ОТВЕТА:',
+    '- messages — 1–2 коротких сообщения в мессенджер, как пишет живой человек. Не больше двух.',
+    '- В lead заполняй только то, что клиент назвал или что точно видно на видео и фото; остальное — пустая строка.',
+    '- lead_ready = true, только когда заявка собрана и в этом же ответе ты сказала, что передаёшь её коллеге.',
+    '- needs_human = true, если нужен живой менеджер; в handoff_reason — коротко почему.',
+    '- Вопрос «ты бот?» сам по себе — не повод звать менеджера: ответь честно и предложи. Зови, если клиент согласился.',
+    '- handoff_reason и summary пиши по-русски, даже если клиент пишет на другом языке: их читает менеджер.',
+    '- summary — суть заявки одной строкой для менеджера: объект, где, что нужно, есть ли видео.'
+  ].join('\n');
+
+  const context = [
+    `ОТВЕЧАЙ НА ${lang.toUpperCase()} ЯЗЫКЕ. Каждое сообщение — только на ${lang}.`,
+    firstReply
+      ? 'Это твой первый ответ. Прямо перед ним клиенту уже ушло приветствие: ты представилась и сказала,'
+        + ' что ты виртуальная помощница. Не здоровайся и не представляйся ещё раз — сразу к делу.'
+      : '',
+    // о нерабочем времени — только при передаче коллеге: в начале разговора это звучит как автоответчик
+    opts.offHours
+      ? `СЕЙЧАС НЕРАБОЧЕЕ ВРЕМЯ, коллеги ответят ${nextOpening(tz)}. Об этом не говори, пока просто ведёшь диалог.`
+        + ` Когда передаёшь заявку или зовёшь менеджера — скажи своими словами: «${opts.offHoursNote}» и когда ответят.`
+      : '',
     `СЕГОДНЯ ${today}, ${weekday}, время ${clock}. Когда клиент называет день словами`
       + ' («завтра», «в субботу», «через неделю») — посчитай настоящую дату от сегодняшней'
       + ' и запиши её в date_iso как ГГГГ-ММ-ДД. В поле date оставь слова клиента.'
       + ' Если день не назван — оба поля пустые, не выдумывай.',
-    '',
     priceLine,
-    facts ? 'УСЛОВИЯ И ЦЕНЫ (только эти, ничего не придумывай):\n' + facts : '',
-    '',
     `Телефон клиента: ${conv.phone}.`,
     known.length
       ? `Уже известно по заявке: ${known.map(([k, v]) => `${k}=${v}`).join(', ')}. Это не переспрашивай.`
       : 'По заявке пока ничего не известно.',
-    '',
-    'Формат ответа: reply — только текст сообщения в мессенджер, как пишет живой человек.',
-    'В lead заполняй только то, что клиент действительно назвал; остальное — пустая строка.',
-    'needs_human = true, если нужен живой менеджер (скидки, спор, жалоба, просьба о человеке, вопрос вне твоих знаний).'
-  ].join('\n');
+    videos || photos
+      ? `Клиент уже присылал: ${[videos && `видео — ${videos}`, photos && `фото — ${photos}`].filter(Boolean).join(', ')}. Видео повторно не проси.`
+      : 'Видео и фото клиент пока не присылал.'
+  ].filter(Boolean).join('\n');
 
-  const { out, usage } = await provider.complete({ system, turns, schema: Answer });
+  const { out, usage } = await provider.complete({ system, context, turns, schema: Answer });
   if (process.env.AI_LOG_COST) {
     console.log(`[ai] ${provider.label()} in=${usage.in} cached=${usage.cached} out=${usage.out}`);
   }
 
-  const replies = (out.messages || []).map((t) => String(t).trim()).filter(Boolean).slice(0, 3);
+  // некоторые модели дважды экранируют юникод — «₪» вместо «₪»
+  const unescape = (t) => String(t).replace(/\\u([0-9a-fA-F]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16))).trim();
+  const replies = (out.messages || []).map(unescape).filter(Boolean).slice(0, 2);
+  // страховка: если модель всё же поздоровалась после автоприветствия — убираем повтор
+  const GREET = /^(здравствуйте|добрый (день|вечер)|доброе утро|привет|вітаю|доброго дня|שלום|hi|hello)[!,.\s—-]*/i;
+  if (firstReply && replies.length && GREET.test(replies[0])) {
+    const rest = replies[0].replace(GREET, '').trim();
+    if (rest) replies[0] = rest[0].toUpperCase() + rest.slice(1); else replies.shift();
+  }
   if (process.env.AI_LOG_COST) {
     const long = replies.filter((r) => r.length > 160);
     if (long.length) console.log('[ai] слишком длинно:', long.map((r) => r.length).join(', '), 'символов');
@@ -177,6 +239,7 @@ export async function generateReply(conv, messages, opts = {}) {
   return {
     replies,
     needs_human: Boolean(out.needs_human),
+    lead_ready: Boolean(out.lead_ready),
     handoff_reason: out.handoff_reason || '',
     summary: out.summary || '',
     lead: {

@@ -70,10 +70,13 @@ const toMessage = (t) => ({
     : t.text
 });
 
-export async function complete({ system, turns, schema }) {
+export async function complete({ system, context = '', turns, schema }) {
+  const sys = context ? `${system}\n\n${context}` : system;
   const jsonSchema = z.toJSONSchema(schema);
-  const messages = [{ role: 'system', content: system }, ...turns.map(toMessage)];
-  const base = { model: MODEL, messages, temperature: 0.4, max_tokens: 1500 };
+  const messages = [{ role: 'system', content: sys }, ...turns.map(toMessage)];
+  // думающие модели (Gemini 2.5+) тратят часть лимита на рассуждения —
+  // при 1500 ответ обрезался посреди JSON и диалог уходил менеджеру как «сбой»
+  const base = { model: MODEL, messages, temperature: 0.4, max_tokens: Number(process.env.AI_MAX_TOKENS) || 4096 };
 
   let data;
   try {
@@ -87,7 +90,7 @@ export async function complete({ system, turns, schema }) {
     data = await call({
       ...base,
       messages: [
-        { role: 'system', content: system + '\n\nОтвечай ТОЛЬКО валидным JSON по схеме:\n' + JSON.stringify(jsonSchema) },
+        { role: 'system', content: sys + '\n\nОтвечай ТОЛЬКО валидным JSON по схеме:\n' + JSON.stringify(jsonSchema) },
         ...turns.map(toMessage)
       ],
       response_format: { type: 'json_object' }

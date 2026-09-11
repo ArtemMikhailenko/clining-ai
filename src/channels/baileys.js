@@ -162,8 +162,10 @@ async function connect() {
       let media = [];
       if (attach) {
         try {
-          const buf = await downloadMediaMessage(msg, 'buffer', {}, { reuploadRequest: sock.updateMediaMessage });
-          media = [await saveMedia(buf, attach.mime, attach.kind)];
+          // видео — потоком сразу на диск, чтобы тяжёлый ролик не держать целиком в памяти
+          const data = await downloadMediaMessage(msg, attach.kind === 'video' ? 'stream' : 'buffer', {},
+            { reuploadRequest: sock.updateMediaMessage });
+          media = [await saveMedia(data, attach.mime, attach.kind)];
         } catch (e) {
           console.error('не скачалось вложение:', e.message);
         }
