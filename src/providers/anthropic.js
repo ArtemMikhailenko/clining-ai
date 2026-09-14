@@ -46,5 +46,6 @@ export async function complete({ system, context = '', turns, schema }) {
   if (!res.parsed_output) throw new Error('модель вернула ответ не по схеме');
 
   const u = res.usage ?? {};
-  return { out: res.parsed_output, usage: { in: u.input_tokens, cached: u.cache_read_input_tokens ?? 0, out: u.output_tokens } };
+  return { out: res.parsed_output, usage: { in: u.input_tokens, cached: u.cache_read_input_tokens ?? 0,
+    created: u.cache_creation_input_tokens ?? 0, out: u.output_tokens } };
 }

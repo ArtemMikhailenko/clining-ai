@@ -184,6 +184,7 @@ export async function generateReply(conv, messages, opts = {}) {
     '',
     'ФОРМАТ ОТВЕТА:',
     '- messages — 1–2 коротких сообщения в мессенджер, как пишет живой человек. Не больше двух.',
+    '- Во всём ответе — не больше одного вопроса, даже если сообщений два. Второй вопрос — в следующем ходе.',
     '- В lead заполняй только то, что клиент назвал или что точно видно на видео и фото; остальное — пустая строка.',
     '- lead_ready = true, только когда заявка собрана и в этом же ответе ты сказала, что передаёшь её коллеге.',
     '- needs_human = true, если нужен живой менеджер; в handoff_reason — коротко почему.',
@@ -219,12 +220,22 @@ export async function generateReply(conv, messages, opts = {}) {
 
   const { out, usage } = await provider.complete({ system, context, turns, schema: Answer });
   if (process.env.AI_LOG_COST) {
-    console.log(`[ai] ${provider.label()} in=${usage.in} cached=${usage.cached} out=${usage.out}`);
+    console.log(`[ai] ${provider.label()} in=${usage.in} cached=${usage.cached} write=${usage.created ?? 0} out=${usage.out}`);
   }
 
   // некоторые модели дважды экранируют юникод — «₪» вместо «₪»
   const unescape = (t) => String(t).replace(/\\u([0-9a-fA-F]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16))).trim();
-  const replies = (out.messages || []).map(unescape).filter(Boolean).slice(0, 2);
+  let replies = (out.messages || []).map(unescape).filter(Boolean).slice(0, 2);
+  // Один вопрос за ход. Модели (даже сильные) любят спросить два пункта сразу,
+  // разнеся их по двум сообщениям, — клиенту это как анкета. Оставляем первый
+  // вопрос, а пояснения без вопроса («по нему посчитаем точно») сохраняем.
+  let asked = false;
+  replies = replies.map((r) => r.split(/(?<=[.!?…])\s+/).filter((sent) => {
+    if (!sent.includes('?')) return true;
+    if (asked) return false;
+    asked = true;
+    return true;
+  }).join(' ').trim()).filter(Boolean);
   // страховка: если модель всё же поздоровалась после автоприветствия — убираем повтор
   const GREET = /^(здравствуйте|добрый (день|вечер)|доброе утро|привет|вітаю|доброго дня|שלום|hi|hello)[!,.\s—-]*/i;
   if (firstReply && replies.length && GREET.test(replies[0])) {
