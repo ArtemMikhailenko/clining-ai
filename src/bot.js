@@ -2,19 +2,22 @@ import { db, addMessage, getOrCreateConversation, getConversation, history, getS
 import { generateReply } from './ai.js';
 import { channel, adapterFor } from './channels/index.js';
 import { detectLang } from './lang.js';
+import { mediaPath } from './media.js';
+import fs from 'node:fs';
 import { withinWorkHours, scheduleSetting, sweepStale, workHours, isHoliday } from './schedule.js';
 
 const listeners = new Set();
 
-// На время тестов бот сидит на личном номере. Чтобы реальные контакты не получали
-// ответы ИИ, автоответ можно ограничить списком номеров — он правится в админке
-// на лету, перезапуск не нужен. Пусто — отвечаем всем.
-// mock — это симулятор, он никуда наружу не пишет, ограничивать его незачем.
-function allowed(phone, ch) {
-  if (ch.name === 'mock') return true;
-  const list = (getSetting('allowed_numbers') || '')
-    .split(/[,\s]+/).map((n) => n.replace(/\D/g, '')).filter(Boolean);
-  return !list.length || list.includes(String(phone).replace(/\D/g, ''));
+// Чёрный список: этим номерам бот не отвечает, и их сообщения не попадают в заявки —
+// личные контакты, сотрудники, спам. Правится в админке на лету, перезапуск не нужен.
+// Сравниваем по последним 9 цифрам: так «050-123-4567» и «+972 50 123 4567» — один номер.
+const tail = (v) => String(v ?? '').replace(/\D/g, '').slice(-9);
+function blocked(phone) {
+  const me = tail(phone);
+  if (me.length < 7) return false;
+  return (getSetting('blocked_numbers') || '')
+    .split(/[,;\n]+/).map(tail).filter((n) => n.length >= 7)
+    .includes(me);
 }
 export const subscribe = (fn) => (listeners.add(fn), () => listeners.delete(fn));
 export const emit = (event, data) => {
@@ -75,6 +78,11 @@ function scheduleReply(convId, ch, text) {
 /** Входящее сообщение клиента: сохранить → при включённом ИИ поставить ответ в очередь. */
 export async function handleIncoming({ phone, name, text, wa_id, chat_id = null, media = [] }, ch = channel) {
   if (messageExists(wa_id)) return;   // повторная доставка того же вебхука
+  if (blocked(phone)) {
+    // вложение канал уже сохранил на диск — за номером из чёрного списка не храним
+    for (const it of media) for (const f of [it.file, ...(it.frames ?? [])]) fs.rm(mediaPath(f), { force: true }, () => {});
+    return;
+  }
   const conv = getOrCreateConversation(ch.name, phone, name, chat_id);
   const msg = addMessage(conv.id, { direction: 'in', author: 'customer', body: text, wa_id, media });
   db.prepare('UPDATE conversations SET unread = unread + 1 WHERE id=?').run(conv.id);
@@ -84,14 +92,6 @@ export async function handleIncoming({ phone, name, text, wa_id, chat_id = null,
   const fresh = getConversation(conv.id);
   const aiOn = getSetting('ai_global') === '1' && fresh.ai_enabled === 1;
   if (!aiOn) return;
-
-  if (!allowed(phone, ch)) {
-    // номер не в белом списке: заявка видна менеджеру, но бот молчит
-    db.prepare("UPDATE conversations SET needs_human=1, handoff_reason='вне белого списка тестирования', status='human', ai_enabled=0 WHERE id=?")
-      .run(conv.id);
-    emit('conversations', null);
-    return;
-  }
 
   scheduleReply(conv.id, ch, text);
 }

@@ -76,7 +76,7 @@ app.get('/api/state', (req, res) => {
     ai_global: getSetting('ai_global') === '1',
     system_prompt: getSetting('system_prompt'),
     greeting: getSetting('greeting'),
-    allowed_numbers: getSetting('allowed_numbers'),
+    blocked_numbers: getSetting('blocked_numbers'),
     business_facts: getSetting('business_facts'),
     price_list: getSetting('price_list') || JSON.stringify(priceList(), null, 2),
     reply_delay: getSetting('reply_delay'),
@@ -98,7 +98,7 @@ app.post('/api/state', (req, res) => {
   if ('ai_global' in req.body) setSetting('ai_global', req.body.ai_global ? '1' : '0');
   if ('system_prompt' in req.body) setSetting('system_prompt', String(req.body.system_prompt));
   if ('greeting' in req.body) setSetting('greeting', String(req.body.greeting));
-  if ('allowed_numbers' in req.body) setSetting('allowed_numbers', String(req.body.allowed_numbers));
+  if ('blocked_numbers' in req.body) setSetting('blocked_numbers', String(req.body.blocked_numbers));
   if ('business_facts' in req.body) setSetting('business_facts', String(req.body.business_facts));
   if ('reply_delay' in req.body) setSetting('reply_delay', String(Number(req.body.reply_delay) || 4000));
   if ('price_list' in req.body) {

@@ -969,7 +969,7 @@ const SET_SECTIONS = [
     i:'<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><path d="M8 9h8M8 13h5"/>' },
   { k:'hours', t:'Расписание', d:'часы, выходные, праздники',
     i:'<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>' },
-  { k:'access', t:'Доступ', d:'белый список, уведомления',
+  { k:'access', t:'Доступ', d:'чёрный список, уведомления',
     i:'<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/>' },
   { k:'conn', t:'Подключения', d:'WhatsApp, модель, QR',
     i:'<path d="M9 2v6M15 2v6M6 8h12v4a6 6 0 0 1-12 0zM12 18v4"/>' }
@@ -1060,8 +1060,8 @@ function renderSettings() {
     access: {
       lead: 'Кому бот отвечает автоматически и как админка зовёт менеджера.',
       body: grp('', '',
-        srow('Белый список номеров', 'Через запятую. Остальным бот молчит, но заявка всё равно появится с пометкой «нужен человек». Пусто — отвечает всем.',
-          `<textarea id="f-allowed" class="mono" rows="3" placeholder="пусто — отвечать всем">${esc(s.allowed_numbers || '')}</textarea>`)
+        srow('Чёрный список', 'Номера, которым бот не отвечает и которые не попадают в заявки: личные контакты, сотрудники, спам. По одному на строку или через запятую, в любом формате — «050-123-4567» или «+972 50 123 4567». Всем остальным бот отвечает.',
+          `<textarea id="f-blocked" class="mono" rows="4" placeholder="+972 50 123 4567">${esc(s.blocked_numbers || '')}</textarea>`)
         + srow('Уведомления в браузере', 'Всплывающее уведомление, когда бот передаёт диалог человеку.',
           `<button class="btn" id="f-notify">${Notification?.permission === 'granted' ? 'Уведомления включены' : 'Включить уведомления'}</button>`))
     },
@@ -1188,7 +1188,7 @@ async function saveSettings() {
   const put = (id, key, tr = (v) => v) => { const el = $(id); if (el) body[key] = tr(el.value); };
   put('#f-company', 'company'); put('#f-tz', 'timezone');
   put('#f-facts', 'business_facts'); put('#f-greeting', 'greeting');
-  put('#f-prompt', 'system_prompt'); put('#f-allowed', 'allowed_numbers'); put('#f-quick', 'quick_replies');
+  put('#f-prompt', 'system_prompt'); put('#f-blocked', 'blocked_numbers'); put('#f-quick', 'quick_replies');
   put('#f-delay', 'reply_delay', (v) => Number(v) * 1000);
   put('#f-off', 'off_hours'); put('#f-offnote', 'off_hours_note');
   put('#f-holidays', 'holidays'); put('#f-autoclose', 'autoclose_days'); put('#f-wip', 'wip_need');
