@@ -8,6 +8,7 @@ import { saveMedia } from './media.js';
 import { withinWorkHours, scheduleSetting, workHours, holidays, isHoliday } from './schedule.js';
 import { quote, priceList } from './pricing.js';
 import { waStatus, onStatus, requestPairing, logout as waLogout, restart as waRestart } from './channels/baileys.js';
+import { sttLabel } from './stt.js';
 import { aiConfigured, aiLabel } from './ai.js';
 
 const app = express();
@@ -80,6 +81,7 @@ app.get('/api/state', (req, res) => {
     manager_numbers: getSetting('manager_numbers'),
     notify_on: getSetting('notify_on') === '1',
     admin_url: getSetting('admin_url') || process.env.RENDER_EXTERNAL_URL || '',
+    stt_label: sttLabel(),
     business_facts: getSetting('business_facts'),
     price_list: getSetting('price_list') || JSON.stringify(priceList(), null, 2),
     reply_delay: getSetting('reply_delay'),
@@ -356,9 +358,11 @@ app.post('/api/sim/incoming', async (req, res) => {
 
   let media = [];
   if (image) {
-    const m = /^data:([^;]+);base64,(.+)$/s.exec(image);
+    // mime у голосовых идёт с кодеком: «audio/ogg; codecs=opus»
+    const m = /^data:([^,]+?);base64,(.+)$/s.exec(image);
     if (!m) return res.status(400).json({ error: 'фото должно быть data-URL' });
-    media = [await saveMedia(Buffer.from(m[2], 'base64'), m[1], m[1].startsWith('video/') ? 'video' : 'image')];
+    const kind = m[1].startsWith('video/') ? 'video' : m[1].startsWith('audio/') ? 'audio' : 'image';
+    media = [await saveMedia(Buffer.from(m[2], 'base64'), m[1], kind)];
   }
   // симулятор всегда пишет в канал mock — ответ никуда наружу не уходит,
   // даже когда боевой WhatsApp подключён

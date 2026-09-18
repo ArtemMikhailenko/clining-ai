@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import { withinWorkHours, scheduleSetting, sweepStale, workHours, isHoliday } from './schedule.js';
 import { quote } from './pricing.js';
 import { notifyHandoff } from './notify.js';
+import { transcribe, sttConfigured } from './stt.js';
 
 const listeners = new Set();
 
@@ -87,7 +88,18 @@ export async function handleIncoming({ phone, name, text, wa_id, chat_id = null,
     return;
   }
   const conv = getOrCreateConversation(ch.name, phone, name, chat_id);
-  const msg = addMessage(conv.id, { direction: 'in', author: 'customer', body: text, wa_id, media });
+
+  // Голосовые: расшифровываем в текст, дальше бот работает с ним как с обычным
+  // сообщением. Сам файл остаётся в диалоге — менеджер может послушать.
+  const voices = media.filter((m) => m.kind === 'audio');
+  for (const v of voices) {
+    try { v.text = await transcribe(v.file); }
+    catch (e) { console.error('расшифровка голосового:', e.message); }
+  }
+  const said = voices.map((v) => v.text).filter(Boolean).join('\n');
+  const body = [text, said].filter(Boolean).join('\n');
+
+  const msg = addMessage(conv.id, { direction: 'in', author: 'customer', body, wa_id, media });
   db.prepare('UPDATE conversations SET unread = unread + 1 WHERE id=?').run(conv.id);
   emit('message', { conv_id: conv.id, message: msg });
   emit('conversations', null);
@@ -96,7 +108,14 @@ export async function handleIncoming({ phone, name, text, wa_id, chat_id = null,
   const aiOn = getSetting('ai_global') === '1' && fresh.ai_enabled === 1;
   if (!aiOn) return;
 
-  scheduleReply(conv.id, ch, text);
+  // голос не расшифровался (сервис не настроен или сбой) — бот не угадывает, зовёт человека
+  if (voices.length && !said) {
+    flagHuman(conv.id, sttConfigured() ? 'не удалось расшифровать голосовое' : 'голосовое сообщение — послушайте сами');
+    emit('conversations', null);
+    return;
+  }
+
+  scheduleReply(conv.id, ch, body);
 }
 
 /** Собственно ответ: вызывается один раз на всю пачку сообщений клиента. */

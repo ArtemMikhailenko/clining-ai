@@ -14,7 +14,8 @@ const run = promisify(execFile);
 const DIR = path.join(process.cwd(), 'data', 'media');
 fs.mkdirSync(DIR, { recursive: true });
 
-const EXT = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'video/mp4': 'mp4', 'video/quicktime': 'mov' };
+const EXT = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'video/mp4': 'mp4', 'video/quicktime': 'mov',
+  'audio/ogg': 'ogg', 'audio/mpeg': 'mp3', 'audio/mp4': 'm4a', 'audio/wav': 'wav', 'audio/webm': 'webm' };
 const FRAMES = 4;
 
 export const mediaPath = (file) => path.join(DIR, path.basename(file));
@@ -25,7 +26,9 @@ export const mediaPath = (file) => path.join(DIR, path.basename(file));
  */
 export async function saveMedia(input, mime, kind) {
   const id = crypto.randomUUID();
-  const file = `${id}.${EXT[mime] ?? (kind === 'video' ? 'mp4' : 'jpg')}`;
+  // у голосовых mime приходит с кодеком: «audio/ogg; codecs=opus»
+  const type = String(mime).split(';')[0].trim();
+  const file = `${id}.${EXT[type] ?? (kind === 'video' ? 'mp4' : kind === 'audio' ? 'ogg' : 'jpg')}`;
   if (Buffer.isBuffer(input)) await fs.promises.writeFile(mediaPath(file), input);
   else await pipeline(input, fs.createWriteStream(mediaPath(file)));
 
@@ -58,6 +61,7 @@ async function videoFrames(file, id) {
 
 /** Что показывать модели: для видео — все извлечённые кадры, для фото — само фото. */
 export async function asImages(item) {
+  if (item.kind !== 'image' && item.kind !== 'video') return [];   // голосовое смотреть нечем
   const files = item.kind === 'video' ? (item.frames ?? (item.frame ? [item.frame] : [])) : [item.file];
   const out = [];
   for (const f of files) {

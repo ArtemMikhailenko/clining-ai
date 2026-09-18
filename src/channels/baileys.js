@@ -51,6 +51,7 @@ function mediaKind(msg) {
   const m = msg.message ?? {};
   if (m.imageMessage) return { kind: 'image', mime: m.imageMessage.mimetype ?? 'image/jpeg' };
   if (m.videoMessage) return { kind: 'video', mime: m.videoMessage.mimetype ?? 'video/mp4' };
+  if (m.audioMessage) return { kind: 'audio', mime: m.audioMessage.mimetype ?? 'audio/ogg' };   // голосовое
   if (m.documentMessage?.mimetype?.startsWith('image/')) {
     return { kind: 'image', mime: m.documentMessage.mimetype };   // фото, отправленное файлом
   }

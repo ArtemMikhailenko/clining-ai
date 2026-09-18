@@ -269,7 +269,7 @@ export function listConversations() {
     SELECT media FROM messages WHERE conv_id = ? AND media IS NOT NULL ORDER BY id DESC LIMIT 3`);
   for (const c of rows) {
     c.thumbs = c.media_count
-      ? thumbs.all(c.id).flatMap((r) => JSON.parse(r.media)).slice(0, 3)
+      ? thumbs.all(c.id).flatMap((r) => JSON.parse(r.media)).filter((x) => x.kind !== 'audio').slice(0, 3)
       : [];
   }
   return rows;

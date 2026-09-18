@@ -96,12 +96,14 @@ async function toTurns(messages) {
     const images = [];
     if (m.media) {
       for (const item of JSON.parse(m.media)) {
-        const kind = item.kind === 'video' ? 'видео' : 'фото';
+        const kind = item.kind === 'video' ? 'видео' : item.kind === 'audio' ? 'голосовое' : 'фото';
         const imgs = withImages.has(m.id) && sent < MAX_FRAMES
           ? (await asImages(item)).slice(0, MAX_FRAMES - sent) : [];
         sent += imgs.length;
         images.push(...imgs);
         // модель должна понимать, что кадры — из одного ролика, а не пачка разных фото
+        // расшифровка голосового уже лежит в тексте сообщения — не дублируем пометкой
+        if (item.kind === 'audio' && item.text) continue;
         const note = imgs.length && item.kind === 'video' ? '[клиент прислал видео, ниже кадры из него]' : `[клиент прислал ${kind}]`;
         text = (text ? text + '\n' : '') + note;
       }
@@ -167,7 +169,7 @@ export async function generateReply(conv, messages, opts = {}) {
   const facts = (getSetting('business_facts') || '').trim();
   const media = messages.flatMap((m) => (m.direction === 'in' && m.media ? JSON.parse(m.media) : []));
   const videos = media.filter((x) => x.kind === 'video').length;
-  const photos = media.length - videos;
+  const photos = media.filter((x) => x.kind === 'image').length;
   // приветствие код шлёт сам; модель его не видит и без подсказки здоровается второй раз
   const firstReply = !messages.some((m) => m.direction === 'out' && m.author !== 'system');
 

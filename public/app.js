@@ -674,7 +674,9 @@ function mediaHtml(m) {
   if (!items.length) return '';
   return `<div class="imgs ${items.length === 1 ? 'one' : ''}">` + items.map((it) => it.kind === 'video'
     ? `<video src="/media/${esc(it.file)}" controls preload="metadata"></video>`
-    : `<img src="/media/${esc(it.file)}" loading="lazy" alt="фото">`).join('') + '</div>';
+    : it.kind === 'audio'
+      ? `<audio src="/media/${esc(it.file)}" controls preload="metadata"></audio>`
+      : `<img src="/media/${esc(it.file)}" loading="lazy" alt="фото">`).join('') + '</div>';
 }
 function chatHtml(c) {
   return `<div class="chat-head">
@@ -848,7 +850,7 @@ function leadHtml(c) {
     .map(([k, t]) => `<div class="kv"><dt>${t}</dt><dd dir="auto">${esc(l[k])}</dd></div>`).join('');
   const rooms = (l.rooms || []).filter((r) => r.room)
     .map((r) => `<div class="room"><b dir="auto">${esc(r.room)}</b><span dir="auto">${esc(r.notes || '')}</span></div>`).join('');
-  const photos = (c.messages || []).flatMap((m) => m.media ? JSON.parse(m.media) : []);
+  const photos = (c.messages || []).flatMap((m) => (m.media ? JSON.parse(m.media) : [])).filter((it) => it.kind !== 'audio');
   const thumbs = photos.map((it) => it.kind === 'video'
     ? `<video src="/media/${esc(it.file)}" preload="metadata"></video>`
     : `<img src="/media/${esc(it.file)}" loading="lazy" alt="">`).join('');
@@ -1078,7 +1080,8 @@ function renderSettings() {
           <div class="ctile"><span>WhatsApp</span><b><i class="led" id="i-led"></i><em id="i-wa">—</em></b></div>
           <div class="ctile"><span>Номер бота</span><b id="i-me">—</b></div>
           <div class="ctile"><span>Канал</span><b>${esc(s.channel || '—')}</b></div>
-          <div class="ctile"><span>Модель</span><b>${esc(s.ai_label || '—')}</b></div></div>`
+          <div class="ctile"><span>Модель</span><b>${esc(s.ai_label || '—')}</b></div>
+          <div class="ctile"><span>Голосовые</span><b>${esc(s.stt_label || 'не настроено')}</b></div></div>`
         + srow('Привязка WhatsApp', 'QR-код или код по номеру телефона, отвязка и переподключение.',
           '<button class="btn primary" id="f-qr">Управлять подключением</button>'))
     }
