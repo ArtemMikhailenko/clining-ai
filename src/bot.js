@@ -8,6 +8,7 @@ import { withinWorkHours, scheduleSetting, sweepStale, workHours, isHoliday } fr
 import { quote } from './pricing.js';
 import { notifyHandoff } from './notify.js';
 import { transcribe, sttConfigured } from './stt.js';
+import { dominantLang } from './lang.js';
 
 const listeners = new Set();
 
@@ -92,8 +93,10 @@ export async function handleIncoming({ phone, name, text, wa_id, chat_id = null,
   // Голосовые: расшифровываем в текст, дальше бот работает с ним как с обычным
   // сообщением. Сам файл остаётся в диалоге — менеджер может послушать.
   const voices = media.filter((m) => m.kind === 'audio');
+  // язык подсказываем по прошлым сообщениям клиента — так расшифровка точнее
+  const hint = voices.length ? dominantLang(history(conv.id)) : '';
   for (const v of voices) {
-    try { v.text = await transcribe(v.file); }
+    try { v.text = await transcribe(v.file, hint); }
     catch (e) { console.error('расшифровка голосового:', e.message); }
   }
   const said = voices.map((v) => v.text).filter(Boolean).join('\n');

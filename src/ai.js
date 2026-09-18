@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { getSetting } from './db.js';
 import { asImages } from './media.js';
-import { detectLang, LANG_NAME } from './lang.js';
+import { dominantLang, LANG_NAME } from './lang.js';
 import { quoteHint } from './pricing.js';
 import { scheduleSetting, scheduleText, workHours, isHoliday } from './schedule.js';
 import * as anthropic from './providers/anthropic.js';
@@ -154,8 +154,7 @@ export async function generateReply(conv, messages, opts = {}) {
   const known = Object.entries(JSON.parse(conv.lead || '{}')).filter(([, v]) => v);
   // язык определяем сами и говорим модели прямо — на инструкцию «отвечай на языке
   // клиента» модели поменьше регулярно сползают на русский
-  const lastIn = [...messages].reverse().find((m) => m.direction === 'in' && m.body);
-  const lang = LANG_NAME[detectLang(lastIn?.body || '')];
+  const lang = LANG_NAME[dominantLang(messages)];
 
   // модель не знает, какое сегодня число: без этого «завтра» и «в субботу»
   // невозможно превратить в дату, а значит нет ни расписания, ни напоминаний
@@ -187,6 +186,8 @@ export async function generateReply(conv, messages, opts = {}) {
     'ФОРМАТ ОТВЕТА:',
     '- messages — 1–2 коротких сообщения в мессенджер, как пишет живой человек. Не больше двух.',
     '- Во всём ответе — не больше одного вопроса, даже если сообщений два. Второй вопрос — в следующем ходе.',
+    '- Не используй длинное тире «—» и многоточие «…»: пиши дефис, запятую или точку.',
+    '- Не поняла сообщение — переспроси своими словами. Менеджера из-за непонятного сообщения не зови.',
     '- В lead заполняй только то, что клиент назвал или что точно видно на видео и фото; остальное — пустая строка.',
     '- lead_ready = true, только когда заявка собрана и в этом же ответе ты сказала, что передаёшь её коллеге.',
     '- needs_human = true, если нужен живой менеджер; в handoff_reason — коротко почему.',
@@ -227,7 +228,9 @@ export async function generateReply(conv, messages, opts = {}) {
 
   // некоторые модели дважды экранируют юникод — «₪» вместо «₪»
   const unescape = (t) => String(t).replace(/\\u([0-9a-fA-F]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16))).trim();
-  let replies = (out.messages || []).map(unescape).filter(Boolean).slice(0, 2);
+  // длинное тире и многоточие — заметный след «писал ИИ»: в мессенджере так не печатают
+  const human = (t) => t.replace(/\s*[—–]\s*/g, ' - ').replace(/…/g, '...').replace(/ {2,}/g, ' ').trim();
+  let replies = (out.messages || []).map((t) => human(unescape(t))).filter(Boolean).slice(0, 2);
   // Один вопрос за ход. Модели (даже сильные) любят спросить два пункта сразу,
   // разнеся их по двум сообщениям, — клиенту это как анкета. Оставляем первый
   // вопрос, а пояснения без вопроса («по нему посчитаем точно») сохраняем.

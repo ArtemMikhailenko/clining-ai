@@ -26,7 +26,7 @@ async function toMp3(file) {
   return out;
 }
 
-export async function transcribe(file) {
+export async function transcribe(file, lang = '') {
   if (!BASE) throw new Error('расшифровка не настроена (STT_BASE_URL)');
   const mp3 = await toMp3(file);
   try {
@@ -34,6 +34,8 @@ export async function transcribe(file) {
     form.append('file', new Blob([await fs.promises.readFile(mp3)], { type: 'audio/mpeg' }), 'voice.mp3');
     form.append('model', MODEL);
     form.append('response_format', 'json');
+    // подсказка языка: по короткому голосовому распознавание путает русский с украинским
+    if (lang) form.append('language', lang);
     const r = await fetch(`${BASE}/audio/transcriptions`, {
       method: 'POST', headers: { Authorization: `Bearer ${KEY}` }, body: form
     });
