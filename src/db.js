@@ -54,6 +54,8 @@ if (!cols.includes('chat_id')) db.exec('ALTER TABLE conversations ADD COLUMN cha
 const mcols = db.prepare('PRAGMA table_info(messages)').all().map((c) => c.name);
 if (!mcols.includes('media')) db.exec('ALTER TABLE messages ADD COLUMN media TEXT');   // JSON: [{file, mime, kind}]
 if (!cols.includes('note')) db.exec('ALTER TABLE conversations ADD COLUMN note TEXT');  // заметка менеджера
+// когда менеджеру ушло уведомление о передаче — чтобы не слать его повторно
+if (!cols.includes('notified_at')) db.exec('ALTER TABLE conversations ADD COLUMN notified_at TEXT');
 
 const DEFAULT_PROMPT = `Ты — Лея, помощница компании по уборке после ремонта. Переписываешься с клиентами в WhatsApp.
 Клиенты приходят с рекламы, первое сообщение часто шаблонное: «Здравствуйте, интересует уборка».
@@ -165,6 +167,10 @@ const DEFAULT_FACTS = [
 seed.run('business_facts', DEFAULT_FACTS);
 // Чёрный список: этим номерам бот не отвечает, в заявки они не попадают. Правится в админке.
 seed.run('blocked_numbers', '');
+// Кому слать уведомления о передаче заявки. Пусто — не слать.
+seed.run('manager_numbers', '');
+seed.run('notify_on', '1');
+seed.run('admin_url', '');   // для ссылки на диалог; на Render берётся из RENDER_EXTERNAL_URL
 // Пауза перед ответом: за неё бот успевает дождаться, пока клиент допишет
 // очередь коротких сообщений, и отвечает один раз на всю пачку.
 seed.run('reply_delay', String(process.env.REPLY_DELAY_MS ?? 4000));

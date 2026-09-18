@@ -1064,6 +1064,13 @@ function renderSettings() {
           `<textarea id="f-blocked" class="mono" rows="4" placeholder="+972 50 123 4567">${esc(s.blocked_numbers || '')}</textarea>`)
         + srow('Уведомления в браузере', 'Всплывающее уведомление, когда бот передаёт диалог человеку.',
           `<button class="btn" id="f-notify">${Notification?.permission === 'granted' ? 'Уведомления включены' : 'Включить уведомления'}</button>`))
+      + grp('Уведомления менеджеру в WhatsApp', 'Когда бот передаёт заявку человеку, на эти номера придёт сообщение: кто написал, что за объект, причина передачи и ссылка на диалог. Шлёт тот же номер, на котором работает бот.',
+        srow('Номера менеджеров', 'По одному на строку и обязательно с кодом страны: «+972 50 123 4567». Без кода страны сообщение не дойдёт. Пусто — не слать.',
+          `<textarea id="f-managers" class="mono" rows="3" placeholder="+972 50 123 4567">${esc(s.manager_numbers || '')}</textarea>`)
+        + srow('Слать уведомления', 'Можно временно выключить, не стирая номера.',
+          `<label class="switch"><input type="checkbox" id="f-notifyon" ${s.notify_on ? 'checked' : ''}></label>`)
+        + srow('Адрес админки', 'Для ссылки на диалог в уведомлении. На Render подставляется сам.',
+          `<input type="text" id="f-adminurl" value="${esc(s.admin_url || '')}" placeholder="https://clining-ai.onrender.com">`))
     },
     conn: {
       lead: 'Канал и модель задаются в файле <code>.env</code> и требуют перезапуска сервера.',
@@ -1188,6 +1195,8 @@ async function saveSettings() {
   const put = (id, key, tr = (v) => v) => { const el = $(id); if (el) body[key] = tr(el.value); };
   put('#f-company', 'company'); put('#f-tz', 'timezone');
   put('#f-facts', 'business_facts'); put('#f-greeting', 'greeting');
+  put('#f-managers', 'manager_numbers'); put('#f-adminurl', 'admin_url');
+  if ($('#f-notifyon')) body.notify_on = $('#f-notifyon').checked;
   put('#f-prompt', 'system_prompt'); put('#f-blocked', 'blocked_numbers'); put('#f-quick', 'quick_replies');
   put('#f-delay', 'reply_delay', (v) => Number(v) * 1000);
   put('#f-off', 'off_hours'); put('#f-offnote', 'off_hours_note');
@@ -1487,6 +1496,8 @@ es.addEventListener('typing', (e) => {
 });
 
 fetch('/api/wa/status').then((r) => r.json()).then(renderWa).catch(() => {});
+const deepLink = Number(new URLSearchParams(location.search).get('conv'));
+if (deepLink) current = deepLink;            // ссылка из уведомления менеджеру
 loadState().then(() => { go('inbox'); loadList(); loadStats(); });
 setInterval(() => { if (page === 'inbox') PAGES[page].render(); }, 60000);
 setInterval(loadState, 60000);   // «рабочее время» должно переключаться само

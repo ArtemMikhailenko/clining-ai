@@ -5,6 +5,8 @@ import { detectLang } from './lang.js';
 import { mediaPath } from './media.js';
 import fs from 'node:fs';
 import { withinWorkHours, scheduleSetting, sweepStale, workHours, isHoliday } from './schedule.js';
+import { quote } from './pricing.js';
+import { notifyHandoff } from './notify.js';
 
 const listeners = new Set();
 
@@ -49,6 +51,7 @@ function workableDay(iso) {
 }
 
 function flagHuman(convId, reason) {
+  notifyHandoff(convId, reason);            // менеджер должен узнать сразу, а не из админки
   // ai_enabled=0 обязательно: иначе бот молчит (status=human), а интерфейс
   // показывает «Перехватить», и вернуть ИИ нечем
   db.prepare("UPDATE conversations SET needs_human=1, handoff_reason=?, status='human', ai_enabled=0 WHERE id=?")
@@ -146,6 +149,13 @@ async function respond(convId, ch, text) {
   // Готовая заявка — без адреса это не заявка, даже если модель поспешила
   const ready = out.lead_ready && Boolean(lead.district || lead.address);
   if (ready) lead.stage = 'заявка готова';
+  // Цену считает код. Если модель записала в карточку свою сумму и она вдвое
+  // больше расчёта — верим расчёту: иначе в воронке висят миллионы.
+  const q = quote(lead);
+  if (q) {
+    const told = Number(String(lead.price_quote || '').replace(/[^\d]/g, ''));
+    if (!told || told > q.total * 2) lead.price_quote = `${q.total.toLocaleString('ru-RU')} ${q.currency}`;
+  }
   db.prepare('UPDATE conversations SET lead=?, summary=?, status=CASE WHEN status=\'new\' THEN \'ai\' ELSE status END WHERE id=?')
     .run(JSON.stringify(lead), out.summary || fresh.summary, conv.id);
 
@@ -153,6 +163,27 @@ async function respond(convId, ch, text) {
   else if (ready) flagHuman(conv.id, 'заявка готова — посмотреть видео и назвать цену');
 
   const replies = [...(out.replies ?? [])];
+
+  // Суммы в тексте тоже проверяем: модель напечатала «21252500 ₪» вместо 21 250 ₪,
+  // и клиент получил счёт на два миллиона. Ставки «25 ₪/м²» не трогаем.
+  const MONEY = /(\d[\d\s.,]*\d|\d)\s*(₪|шек\w*|ils|nis|שקל|ש"ח)/gi;
+  const amount = (m) => Number(String(m).replace(/[^\d]/g, ''));
+  if (q) {
+    for (let i = 0; i < replies.length; i++) {
+      replies[i] = replies[i].replace(MONEY, (whole, num, cur, at, str) => {
+        if (/^\s*\/?\s*(м|m)/i.test(str.slice(at + whole.length))) return whole;   // это ставка за метр
+        const v = amount(num);
+        return v > q.total * 2 ? `${q.total.toLocaleString('ru-RU')} ${cur}` : whole;
+      });
+    }
+  } else if (replies.some((r) => [...r.matchAll(MONEY)].some((m) => amount(m[1]) >= 200000))) {
+    // расчёта нет, а сумма запредельная для уборки — клиенту такое не отправляем
+    flagHuman(conv.id, 'модель назвала подозрительную сумму — проверьте расчёт');
+    addMessage(conv.id, { direction: 'out', author: 'system', body: 'Ответ не отправлен: подозрительная сумма в тексте.', error: '1' });
+    emit('conversations', null);
+    emit('message', { conv_id: conv.id });
+    return;
+  }
 
   // первый наш ответ в диалоге предваряем приветствием с раскрытием ИИ:
   // это требование правил WhatsApp, его нельзя оставлять на усмотрение модели
@@ -216,9 +247,9 @@ export async function sendAsHuman(convId, text, keepAi = false) {
   } catch (e) { err = e.message; }
   const msg = addMessage(convId, { direction: 'out', author: 'human', body: text, wa_id: wa, error: err });
   if (keepAi) {
-    db.prepare("UPDATE conversations SET needs_human=0, handoff_reason=NULL, unread=0 WHERE id=?").run(convId);
+    db.prepare("UPDATE conversations SET needs_human=0, handoff_reason=NULL, unread=0, notified_at=NULL WHERE id=?").run(convId);
   } else {
-    db.prepare("UPDATE conversations SET status='human', ai_enabled=0, needs_human=0, handoff_reason=NULL, unread=0 WHERE id=?").run(convId);
+    db.prepare("UPDATE conversations SET status='human', ai_enabled=0, needs_human=0, handoff_reason=NULL, unread=0, notified_at=NULL WHERE id=?").run(convId);
   }
   emit('message', { conv_id: convId, message: msg });
   emit('conversations', null);

@@ -77,6 +77,9 @@ app.get('/api/state', (req, res) => {
     system_prompt: getSetting('system_prompt'),
     greeting: getSetting('greeting'),
     blocked_numbers: getSetting('blocked_numbers'),
+    manager_numbers: getSetting('manager_numbers'),
+    notify_on: getSetting('notify_on') === '1',
+    admin_url: getSetting('admin_url') || process.env.RENDER_EXTERNAL_URL || '',
     business_facts: getSetting('business_facts'),
     price_list: getSetting('price_list') || JSON.stringify(priceList(), null, 2),
     reply_delay: getSetting('reply_delay'),
@@ -99,6 +102,9 @@ app.post('/api/state', (req, res) => {
   if ('system_prompt' in req.body) setSetting('system_prompt', String(req.body.system_prompt));
   if ('greeting' in req.body) setSetting('greeting', String(req.body.greeting));
   if ('blocked_numbers' in req.body) setSetting('blocked_numbers', String(req.body.blocked_numbers));
+  if ('manager_numbers' in req.body) setSetting('manager_numbers', String(req.body.manager_numbers));
+  if ('notify_on' in req.body) setSetting('notify_on', req.body.notify_on ? '1' : '0');
+  if ('admin_url' in req.body) setSetting('admin_url', String(req.body.admin_url).trim());
   if ('business_facts' in req.body) setSetting('business_facts', String(req.body.business_facts));
   if ('reply_delay' in req.body) setSetting('reply_delay', String(Number(req.body.reply_delay) || 4000));
   if ('price_list' in req.body) {
@@ -285,7 +291,8 @@ app.post('/api/conversations/:id/send', async (req, res) => {
 app.post('/api/conversations/:id/mode', (req, res) => {
   const id = Number(req.params.id);
   const ai = Boolean(req.body.ai_enabled);
-  db.prepare('UPDATE conversations SET ai_enabled=?, status=?, needs_human=0, handoff_reason=NULL WHERE id=?')
+  // вернули боту — значит передачу отработали: следующее уведомление снова придёт
+  db.prepare('UPDATE conversations SET ai_enabled=?, status=?, needs_human=0, handoff_reason=NULL, notified_at=NULL WHERE id=?')
     .run(ai ? 1 : 0, ai ? 'ai' : 'human', id);
   addMessage(id, { direction: 'out', author: 'system', body: ai ? 'ИИ снова ведёт диалог' : 'Диалог перехвачен менеджером' });
   emit('conversations', null);
