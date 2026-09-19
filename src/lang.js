@@ -26,8 +26,10 @@ export function dominantLang(messages = []) {
     const l = detectLang(m.body);
     score[l] = (score[l] ?? 0) + (voice ? 1 : 2);
   }
+  // Пусто — значит это первое сообщение в диалоге. Возвращаем пустую строку:
+  // подсказка «английский» заставляла Whisper переводить иврит вместо расшифровки.
   const best = Object.entries(score).sort((a, b) => b[1] - a[1])[0];
-  return best?.[0] ?? detectLang(last.at(-1)?.body || '');
+  return best?.[0] ?? '';
 }
 
 export const LANG_NAME = { he: 'иврите', uk: 'украинском', ru: 'русском', en: 'английском' };

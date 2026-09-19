@@ -14,14 +14,24 @@ import { mediaPath } from './media.js';
 const run = promisify(execFile);
 const BASE = (process.env.STT_BASE_URL || '').replace(/\/$/, '');
 const KEY = process.env.STT_KEY || '';
-const MODEL = process.env.STT_MODEL || 'whisper-large-v3-turbo';
+// large-v3 заметно точнее turbo на разговорном иврите: turbo выдавал несуществующие
+// слова («נתעדכד» вместо «נתעדכן»), разница в скорости — доли секунды
+const MODEL = process.env.STT_MODEL || 'whisper-large-v3';
+// словарь темы: с ним распознаются наши слова — «להתקין», «תריסים», «шпаклёвка»
+const GLOSSARY = process.env.STT_PROMPT
+  || 'ניקיון אחרי שיפוץ, תריסים, חלונות, ליטוש רצפה, צבע, שפכטל, מלט, אבק בניין, דירה, משרד, מטר רבוע. '
+   + 'Уборка после ремонта, трисы, окна, полировка пола, краска, шпаклёвка, цемент, строительная пыль, квартира, офис.';
 
 export const sttConfigured = () => Boolean(BASE);
 export const sttLabel = () => (BASE ? `${new URL(BASE).host} · ${MODEL}` : 'не настроено');
 
-/** Голосовые из WhatsApp приходят в opus/ogg — перегоняем в mp3: его принимают все сервисы. */
 const resolve = (file) => (path.isAbsolute(file) ? file : mediaPath(file));
 
+// Эти форматы сервисы расшифровки принимают как есть. Лишнее перекодирование в mp3
+// съедает качество: на иврите из-за него в тексте появлялись ошибки.
+const NATIVE = new Set(['.ogg', '.oga', '.opus', '.mp3', '.m4a', '.wav', '.webm', '.flac', '.mp4', '.mpga']);
+
+/** Всё остальное (редкие контейнеры) перегоняем в mp3. */
 async function toMp3(file) {
   const out = path.join(os.tmpdir(), `${crypto.randomUUID()}.mp3`);
   await run('ffmpeg', ['-y', '-i', resolve(file), '-ac', '1', '-ar', '16000', '-b:a', '64k', out]);
@@ -43,14 +53,17 @@ export async function transcribe(file, lang = '') {
 
 async function post(file, lang, format) {
   if (!BASE) throw new Error('расшифровка не настроена (STT_BASE_URL)');
-  const mp3 = await toMp3(file);
+  const src = resolve(file);
+  const ready = NATIVE.has(path.extname(src).toLowerCase());
+  const audio = ready ? src : await toMp3(file);
   try {
     const form = new FormData();
-    form.append('file', new Blob([await fs.promises.readFile(mp3)], { type: 'audio/mpeg' }), 'voice.mp3');
+    form.append('file', new Blob([await fs.promises.readFile(audio)]), path.basename(audio));
     form.append('model', MODEL);
     form.append('response_format', format);
     // подсказка языка: по короткому голосовому распознавание путает русский с украинским
     if (lang) form.append('language', lang);
+    if (GLOSSARY) form.append('prompt', GLOSSARY);
     const r = await fetch(`${BASE}/audio/transcriptions`, {
       method: 'POST', headers: { Authorization: `Bearer ${KEY}` }, body: form
     });
@@ -58,6 +71,6 @@ async function post(file, lang, format) {
     if (!r.ok) throw new Error(`${r.status}: ${String(data.error?.message ?? JSON.stringify(data)).slice(0, 200)}`);
     return data;
   } finally {
-    fs.rm(mp3, { force: true }, () => {});
+    if (!ready) fs.rm(audio, { force: true }, () => {});   // убираем только временный файл
   }
 }

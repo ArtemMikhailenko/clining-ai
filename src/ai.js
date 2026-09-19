@@ -167,7 +167,7 @@ export async function generateReply(conv, messages, opts = {}) {
   const known = Object.entries(JSON.parse(conv.lead || '{}')).filter(([, v]) => v);
   // язык определяем сами и говорим модели прямо — на инструкцию «отвечай на языке
   // клиента» модели поменьше регулярно сползают на русский
-  const lang = LANG_NAME[dominantLang(messages)];
+  const lang = LANG_NAME[dominantLang(messages) || 'ru'];
 
   // модель не знает, какое сегодня число: без этого «завтра» и «в субботу»
   // невозможно превратить в дату, а значит нет ни расписания, ни напоминаний
