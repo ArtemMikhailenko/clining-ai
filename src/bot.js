@@ -8,6 +8,8 @@ import { withinWorkHours, scheduleSetting, sweepStale, workHours, isHoliday } fr
 import { quote } from './pricing.js';
 import { notifyHandoff } from './notify.js';
 import { transcribe, sttConfigured } from './stt.js';
+import { analyzeVideo, duration, videoLimitMinutes } from './video.js';
+import { aiProvider } from './ai.js';
 import { dominantLang } from './lang.js';
 
 const listeners = new Set();
@@ -42,6 +44,21 @@ function pickGreeting(text) {
   const fill = (s) => s.replaceAll('{company}', getSetting('company') || '');
   if (!map.size) return fill(raw);                 // одна строка без префикса — как есть
   return fill(map.get(detectLang(text)) ?? map.get('ru') ?? [...map.values()][0]);
+}
+
+/** Что увидели на видео — сразу в карточку заявки, чтобы менеджер не пересматривал. */
+function applyReport(convId, report) {
+  const conv = getConversation(convId);
+  if (!conv) return;
+  const lead = JSON.parse(conv.lead || '{}');
+  lead.rooms = [...(lead.rooms ?? []), ...(report.rooms ?? [])].slice(0, 12);
+  if (!lead.condition && report.condition) lead.condition = report.condition;
+  if (report.works?.length) {
+    const had = String(lead.works || '').split(',').map((x) => x.trim()).filter(Boolean);
+    lead.works = [...new Set([...had, ...report.works])].join(', ');
+  }
+  db.prepare('UPDATE conversations SET lead=? WHERE id=?').run(JSON.stringify(lead), convId);
+  emit('conversations', null);
 }
 
 /** Можно ли назначить уборку на эту дату: рабочий день и не праздник. */
@@ -116,6 +133,38 @@ export async function handleIncoming({ phone, name, text, wa_id, chat_id = null,
     flagHuman(conv.id, sttConfigured() ? 'не удалось расшифровать голосовое' : 'голосовое сообщение — послушайте сами');
     emit('conversations', null);
     return;
+  }
+
+  // Видео разбираем до ответа: кадры по смене сцены плюс слова клиента с этого же
+  // отрезка. Ролик длиной в минуту разбирается десятки секунд — предупреждаем клиента.
+  const clips = media.filter((m) => m.kind === 'video');
+  if (clips.length && aiProvider.configured()) {
+    const lengths = await Promise.all(clips.map((c) => duration(c.file)));
+    if (Math.max(...lengths) > (Number(process.env.VIDEO_NOTE_SECONDS) || 20)) {
+      const note = 'Смотрю видео, минутку';
+      try {
+        await adapterFor(fresh).send(fresh, note);
+        addMessage(conv.id, { direction: 'out', author: 'ai', body: note });
+        emit('message', { conv_id: conv.id });
+      } catch {}
+    }
+    let long = null;
+    for (const clip of clips) {
+      try {
+        const report = await analyzeVideo(clip, aiProvider);
+        if (report?.tooLong) { long = report; continue; }
+        if (report) { clip.report = report; applyReport(conv.id, report); }
+      } catch (e) {
+        console.error('разбор видео:', e.message);
+      }
+    }
+    db.prepare('UPDATE messages SET media=? WHERE id=?').run(JSON.stringify(media), msg.id);
+    emit('message', { conv_id: conv.id });
+    if (long) {
+      flagHuman(conv.id, `видео на ${long.minutes} мин — длиннее ${videoLimitMinutes()}, посмотрите сами`);
+      emit('conversations', null);
+      return;
+    }
   }
 
   scheduleReply(conv.id, ch, body);

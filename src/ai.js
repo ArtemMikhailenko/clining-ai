@@ -10,6 +10,7 @@ import * as openai from './providers/openai.js';
 // AI_PROVIDER=anthropic (по умолчанию) | openai — любой OpenAI-совместимый эндпоинт
 const provider = (process.env.AI_PROVIDER || 'anthropic') === 'openai' ? openai : anthropic;
 
+export const aiProvider = provider;
 export const aiConfigured = () => provider.configured();
 export const aiLabel = () => (provider.configured() ? provider.label() : 'заглушки');
 
@@ -96,6 +97,18 @@ async function toTurns(messages) {
     const images = [];
     if (m.media) {
       for (const item of JSON.parse(m.media)) {
+        // видео уже разобрано кадрами отдельно — в диалог идёт готовый разбор, а не кадры
+        if (item.kind === 'video' && item.report) {
+          const r = item.report;
+          const bits = [
+            r.summary,
+            (r.rooms ?? []).map((x) => `${x.room}: ${x.notes}`).join('; '),
+            r.works?.length ? `нужно: ${r.works.join(', ')}` : '',
+            r.said ? `клиент говорит: ${r.said}` : ''
+          ].filter(Boolean).join('. ');
+          text = (text ? text + '\n' : '') + `[клиент прислал видео. Что на нём: ${bits}]`;
+          continue;
+        }
         const kind = item.kind === 'video' ? 'видео' : item.kind === 'audio' ? 'голосовое' : 'фото';
         const imgs = withImages.has(m.id) && sent < MAX_FRAMES
           ? (await asImages(item)).slice(0, MAX_FRAMES - sent) : [];
