@@ -87,6 +87,13 @@ app.get('/api/state', (req, res) => {
     nudge_repeat_hours: getSetting('nudge_repeat_hours'),
     nudge_max: getSetting('nudge_max'),
     nudge_stale_hours: getSetting('nudge_stale_hours'),
+    nudge_steps_ask: getSetting('nudge_steps_ask'),
+    nudge_steps_quoted: getSetting('nudge_steps_quoted'),
+    confirm_on: getSetting('confirm_on') === '1',
+    confirm_eve_hour: getSetting('confirm_eve_hour'),
+    confirm_morning_hour: getSetting('confirm_morning_hour'),
+    manager_ping_hours: getSetting('manager_ping_hours'),
+    stop_words: getSetting('stop_words'),
     business_facts: getSetting('business_facts'),
     price_list: getSetting('price_list') || JSON.stringify(priceList(), null, 2),
     reply_delay: getSetting('reply_delay'),
@@ -113,7 +120,12 @@ app.post('/api/state', (req, res) => {
   if ('notify_on' in req.body) setSetting('notify_on', req.body.notify_on ? '1' : '0');
   if ('admin_url' in req.body) setSetting('admin_url', String(req.body.admin_url).trim());
   if ('nudge_on' in req.body) setSetting('nudge_on', req.body.nudge_on ? '1' : '0');
-  for (const k of ['nudge_hours', 'nudge_repeat_hours', 'nudge_max', 'nudge_stale_hours']) {
+  if ('confirm_on' in req.body) setSetting('confirm_on', req.body.confirm_on ? '1' : '0');
+  for (const k of ['nudge_steps_ask', 'nudge_steps_quoted', 'stop_words']) {
+    if (k in req.body) setSetting(k, String(req.body[k]).trim());
+  }
+  for (const k of ['nudge_hours', 'nudge_repeat_hours', 'nudge_max', 'nudge_stale_hours',
+    'confirm_eve_hour', 'confirm_morning_hour', 'manager_ping_hours']) {
     if (k in req.body) setSetting(k, String(Number(req.body[k]) || 0));
   }
   if ('business_facts' in req.body) setSetting('business_facts', String(req.body.business_facts));
@@ -192,8 +204,19 @@ app.get('/api/stats', (req, res) => {
     .map((c) => ({ ...c, l: JSON.parse(c.lead || '{}') }));
   const prevMoney = prevRows.map((c) => Number(String(c.l.price_quote || '').replace(/[^\d]/g, ''))).filter((n) => n > 0);
 
+  // сколько напоминаний ушло и сколько из них вернули клиента в разговор
+  const nudgeSent = db.prepare(`
+    SELECT count(*) n FROM messages
+    WHERE kind IN ('nudge','followup','confirm') AND created_at >= datetime('now', ?)`).get(since).n;
+  const nudgeReplied = db.prepare(`
+    SELECT count(*) n FROM messages m
+    WHERE m.kind IN ('nudge','followup','confirm') AND m.created_at >= datetime('now', ?)
+      AND EXISTS (SELECT 1 FROM messages r WHERE r.conv_id = m.conv_id AND r.direction = 'in'
+                  AND r.id > m.id AND r.created_at <= datetime(m.created_at, '+48 hours'))`).get(since).n;
+
   res.json({
     days,
+    nudges: { sent: nudgeSent, replied: nudgeReplied },
     by_day: byDay,
     prev: {
       total: prevRows.length,

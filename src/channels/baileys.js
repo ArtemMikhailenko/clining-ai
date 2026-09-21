@@ -14,6 +14,7 @@ import QRCode from 'qrcode';
 import path from 'node:path';
 import fs from 'node:fs';
 import { saveMedia } from '../media.js';
+import { setMessageStatus } from '../db.js';
 
 let sock = null;
 let onMessage = null;
@@ -122,6 +123,16 @@ async function connect() {
       // навсегда оставался без QR до перезапуска сервера. Теперь начинаем с чистого листа.
       if (loggedOut) wipeAuth();
       setTimeout(() => live() && connect().catch((e) => console.error('WhatsApp:', e.message)), loggedOut ? 1000 : 3000);
+    }
+  });
+
+  // доставлено/прочитано: по этому видно, дошло ли сообщение и читает ли клиент
+  sock.ev.on('messages.update', (updates) => {
+    if (!live()) return;
+    const MAP = { 2: 'sent', 3: 'delivered', 4: 'read', 5: 'read' };
+    for (const u of updates) {
+      const st = MAP[u.update?.status];
+      if (st && u.key?.id) { try { setMessageStatus(u.key.id, st); } catch {} }
     }
   });
 

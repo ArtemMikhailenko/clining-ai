@@ -53,6 +53,10 @@ if (!cols.includes('chat_id')) db.exec('ALTER TABLE conversations ADD COLUMN cha
 
 const mcols = db.prepare('PRAGMA table_info(messages)').all().map((c) => c.name);
 if (!mcols.includes('media')) db.exec('ALTER TABLE messages ADD COLUMN media TEXT');   // JSON: [{file, mime, kind}]
+// чем было сообщение: обычный ответ, напоминание, подтверждение заказа — нужно для отчёта
+if (!mcols.includes('kind')) db.exec('ALTER TABLE messages ADD COLUMN kind TEXT');
+// статус доставки из WhatsApp: sent | delivered | read
+if (!mcols.includes('status')) db.exec('ALTER TABLE messages ADD COLUMN status TEXT');
 if (!cols.includes('note')) db.exec('ALTER TABLE conversations ADD COLUMN note TEXT');  // заметка менеджера
 // когда менеджеру ушло уведомление о передаче — чтобы не слать его повторно
 if (!cols.includes('notified_at')) db.exec('ALTER TABLE conversations ADD COLUMN notified_at TEXT');
@@ -60,6 +64,11 @@ if (!cols.includes('notified_at')) db.exec('ALTER TABLE conversations ADD COLUMN
 if (!cols.includes('followup_at')) db.exec('ALTER TABLE conversations ADD COLUMN followup_at TEXT');
 if (!cols.includes('followup_note')) db.exec('ALTER TABLE conversations ADD COLUMN followup_note TEXT');
 if (!cols.includes('nudges')) db.exec('ALTER TABLE conversations ADD COLUMN nudges INTEGER NOT NULL DEFAULT 0');
+// клиент попросил не писать — больше никаких напоминаний по своей инициативе
+if (!cols.includes('nudge_stop')) db.exec('ALTER TABLE conversations ADD COLUMN nudge_stop INTEGER NOT NULL DEFAULT 0');
+if (!cols.includes('last_nudge_at')) db.exec('ALTER TABLE conversations ADD COLUMN last_nudge_at TEXT');
+if (!cols.includes('confirm_sent')) db.exec('ALTER TABLE conversations ADD COLUMN confirm_sent TEXT');   // eve | morning
+if (!cols.includes('mgr_ping_at')) db.exec('ALTER TABLE conversations ADD COLUMN mgr_ping_at TEXT');
 
 const DEFAULT_PROMPT = `Ты — Лея, помощница компании по уборке после ремонта. Переписываешься с клиентами в WhatsApp.
 Клиенты приходят с рекламы, первое сообщение часто шаблонное: «Здравствуйте, интересует уборка».
@@ -181,6 +190,21 @@ seed.run('nudge_hours', '20');          // через сколько часов 
 seed.run('nudge_repeat_hours', '72');   // через сколько после него второе
 seed.run('nudge_max', '2');             // больше двух раз не напоминаем
 seed.run('nudge_stale_hours', '336');   // молчит дольше двух недель — напоминать поздно
+// Ритм торканий зависит от того, где остановились: вопрос без ответа остывает быстрее,
+// чем «подумаю» после цены. Часы от последнего сообщения бота.
+seed.run('nudge_steps_ask', '3,24,72');
+seed.run('nudge_steps_quoted', '24,72,168');
+// Подтверждение заказа накануне и утром — меньше срывов выезда
+seed.run('confirm_on', '1');
+seed.run('confirm_eve_hour', '18');
+seed.run('confirm_morning_hour', '8');
+// Диалоги, которые ведёт менеджер, бот не дожимает — напоминает самому менеджеру
+seed.run('manager_ping_hours', '48');
+seed.run('stop_words', [
+  'не пишите', 'не пиши', 'не писать', 'отпишитесь', 'отписаться', 'хватит писать',
+  'перестаньте писать', 'не беспокойте', 'не турбуйте', 'stop', 'unsubscribe',
+  'תפסיקו לכתוב', 'אל תכתבו', 'להסיר אותי'
+].join('\n'));
 // Пауза перед ответом: за неё бот успевает дождаться, пока клиент допишет
 // очередь коротких сообщений, и отвечает один раз на всю пачку.
 seed.run('reply_delay', String(process.env.REPLY_DELAY_MS ?? 4000));
@@ -249,13 +273,17 @@ export function getOrCreateConversation(channel, phone, name, chatId = null) {
 export const messageExists = (waId) =>
   Boolean(waId) && Boolean(db.prepare('SELECT 1 FROM messages WHERE wa_id=?').get(waId));
 
-export function addMessage(convId, { direction, author, body, wa_id = null, error = null, media = null }) {
+export function addMessage(convId, { direction, author, body, wa_id = null, error = null, media = null, kind = null }) {
   const { lastInsertRowid } = db
-    .prepare('INSERT INTO messages(conv_id,direction,author,body,wa_id,error,media) VALUES(?,?,?,?,?,?,?)')
-    .run(convId, direction, author, body, wa_id, error, media?.length ? JSON.stringify(media) : null);
+    .prepare('INSERT INTO messages(conv_id,direction,author,body,wa_id,error,media,kind) VALUES(?,?,?,?,?,?,?,?)')
+    .run(convId, direction, author, body, wa_id, error, media?.length ? JSON.stringify(media) : null, kind);
   db.prepare("UPDATE conversations SET last_at = datetime('now') WHERE id=?").run(convId);
   return db.prepare('SELECT * FROM messages WHERE id=?').get(lastInsertRowid);
 }
+
+/** Статус доставки приходит от WhatsApp отдельным событием, уже после отправки. */
+export const setMessageStatus = (waId, status) =>
+  db.prepare('UPDATE messages SET status=? WHERE wa_id=?').run(status, waId);
 
 export const history = (convId, limit = 40) =>
   db.prepare('SELECT * FROM messages WHERE conv_id=? ORDER BY id DESC LIMIT ?').all(convId, limit).reverse();

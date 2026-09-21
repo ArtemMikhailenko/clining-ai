@@ -34,6 +34,20 @@ export function handoffText(conv, reason) {
   ].filter(Boolean).join('\n');
 }
 
+/** Просто написать менеджерам: используется и для передачи, и для «диалог молчит». */
+export async function notifyManagers(text) {
+  if (getSetting('notify_on') !== '1') return false;
+  const to = numbers();
+  if (!to.length) return false;
+  for (const phone of to) {
+    try { await channel.send({ phone, chat_id: null, channel: channel.name }, text); }
+    catch (e) { console.error('уведомление менеджеру не ушло:', e.message); }
+  }
+  return true;
+}
+
+export const adminLink = (convId) => (adminUrl() ? `${adminUrl()}/?conv=${convId}` : '');
+
 /** Шлём один раз на передачу: пока менеджер не ответил, повторно не дёргаем. */
 export async function notifyHandoff(convId, reason) {
   try {

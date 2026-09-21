@@ -9,6 +9,8 @@ import { quote } from './pricing.js';
 import { notifyHandoff } from './notify.js';
 import { transcribe, sttConfigured } from './stt.js';
 import { analyzeVideo, duration, videoLimitMinutes } from './video.js';
+import { isStopRequest, cadence, missingFor, touchGoal, jitterMinutes, confirmHours, settings as nudgeSettings } from './followups.js';
+import { notifyManagers, adminLink } from './notify.js';
 import { aiProvider } from './ai.js';
 import { dominantLang } from './lang.js';
 
@@ -120,6 +122,12 @@ export async function handleIncoming({ phone, name, text, wa_id, chat_id = null,
   const body = [text, said].filter(Boolean).join('\n');
 
   const msg = addMessage(conv.id, { direction: 'in', author: 'customer', body, wa_id, media });
+
+  // «не пишите мне» — выключаем все напоминания по этому диалогу навсегда
+  if (isStopRequest(body)) {
+    db.prepare('UPDATE conversations SET nudge_stop=1, followup_at=NULL, followup_note=NULL WHERE id=?').run(conv.id);
+    addMessage(conv.id, { direction: 'out', author: 'system', body: 'Клиент просил не писать: напоминания для этого диалога выключены' });
+  }
   // клиент ответил — счётчик напоминаний обнуляем
   db.prepare('UPDATE conversations SET unread = unread + 1, nudges = 0 WHERE id=?').run(conv.id);
   emit('message', { conv_id: conv.id, message: msg });
@@ -295,21 +303,31 @@ async function respond(convId, ch, text) {
  * Ручной ответ оператора. По умолчанию забирает диалог себе (ИИ замолкает) —
  * но иногда надо просто вставить реплику и оставить бота работать, для этого keepAi.
  */
-/* ───── напоминания и дожим ─────
-   Бот сам пишет первым в двух случаях: наступил день, о котором договорились
-   с клиентом, или клиент замолчал после названной цены. Только в рабочие часы —
-   сообщение в три ночи выглядит как спам, а не как забота. */
+/* ───── напоминания, дожим и подтверждение заказа ─────
+   Бот пишет первым только по делу: наступил день, о котором договорились,
+   клиент замолчал на середине разговора, или завтра к нему едет бригада.
+   Всё остальное время он молчит. Правила ритма — в followups.js. */
 const hoursSince = (sqlTime) => (Date.now() - new Date(String(sqlTime).replace(' ', 'T') + 'Z')) / 36e5;
 const todayLocal = () => new Intl.DateTimeFormat('sv-SE', { timeZone: scheduleSetting('timezone') }).format(new Date());
+const addDays = (iso, n) => {
+  const d = new Date(iso + 'T12:00:00Z');
+  d.setUTCDate(d.getUTCDate() + n);
+  return new Intl.DateTimeFormat('sv-SE').format(d);
+};
+const recently = (sqlTime, hrs) => Boolean(sqlTime) && hoursSince(sqlTime) < hrs;
+const PER_RUN = 10;            // предохранитель: не заваливаем всех разом после перезапуска
 
-async function sendNudge(conv, kind, extra) {
+async function sendInitiative(conv, kind, extra = {}) {
   const out = await generateReply(conv, history(conv.id), { nudge: { kind, ...extra } });
   const text = (out.replies ?? [])[0];
   if (!text) return false;
   try {
     const wa = (await adapterFor(conv).send(conv, text)).wa_id;
-    const msg = addMessage(conv.id, { direction: 'out', author: 'ai', body: text, wa_id: wa });
+    const msg = addMessage(conv.id, { direction: 'out', author: 'ai', body: text, wa_id: wa, kind });
+    db.prepare("UPDATE conversations SET last_nudge_at = datetime('now') WHERE id=?").run(conv.id);
     emit('message', { conv_id: conv.id, message: msg });
+    // на официальном API вне 24 часов бесплатно писать нельзя — пригодится при переходе
+    if (extra.outside) console.log(`[напоминание] диалог ${conv.id}: вне 24-часового окна`);
     return true;
   } catch (e) {
     console.error('напоминание не ушло:', e.message);
@@ -319,49 +337,107 @@ async function sendNudge(conv, kind, extra) {
 
 export async function runFollowUps() {
   if (getSetting('ai_global') !== '1') return;
+  const tz = scheduleSetting('timezone');
   const today = todayLocal();
-  if (!withinWorkHours() || isHoliday(today)) return;
+  if (isHoliday(today)) return;
 
+  const hours = workHours()[new Date(today + 'T12:00:00Z').getUTCDay()];
+  if (!Array.isArray(hours)) return;                       // выходной — молчим
+  const nowHour = Number(new Intl.DateTimeFormat('en-GB', { timeZone: tz, hour: '2-digit', hour12: false }).format(new Date()));
+  const [openHour, closeHour] = hours.map((h) => Number(String(h).slice(0, 2)));
+  if (nowHour >= closeHour) return;
+
+  const cfg = nudgeSettings();
+  const { eve, morning } = confirmHours();
   const rows = db.prepare(`
     SELECT c.*,
-      (SELECT direction FROM messages m WHERE m.conv_id = c.id ORDER BY m.id DESC LIMIT 1) AS last_dir
+      (SELECT direction FROM messages m WHERE m.conv_id = c.id ORDER BY m.id DESC LIMIT 1) AS last_dir,
+      (SELECT status FROM messages m WHERE m.conv_id = c.id AND m.direction = 'out' ORDER BY m.id DESC LIMIT 1) AS last_status,
+      (SELECT max(created_at) FROM messages m WHERE m.conv_id = c.id AND m.direction = 'in') AS last_in_at,
+      (SELECT count(*) FROM messages m WHERE m.conv_id = c.id AND m.direction = 'in' AND m.media IS NOT NULL) AS media_count
     FROM conversations c
-    WHERE c.status != 'closed' AND c.needs_human = 0 AND c.ai_enabled = 1`).all();
+    WHERE c.status != 'closed' AND c.nudge_stop = 0`).all();
 
-  const on = getSetting('nudge_on') === '1';
-  const first = Number(getSetting('nudge_hours')) || 20;
-  const again = Number(getSetting('nudge_repeat_hours')) || 72;
-  const max = Number(getSetting('nudge_max')) || 2;
-  const stale = Number(getSetting('nudge_stale_hours')) || 336;
-  let changed = false;
-  let sent = 0;
-  const PER_RUN = 10;      // предохранитель: не заваливаем всех разом после перезапуска
-
+  let sent = 0, changed = false;
   for (const conv of rows) {
+    if (sent >= PER_RUN) break;
     try {
       let lead = {};
       try { lead = JSON.parse(conv.lead || '{}'); } catch {}
-      if (lead.stage === 'отказ') continue;              // передумал — не преследуем
+      const silent = hoursSince(conv.last_at);
+      const sinceIn = conv.last_in_at ? hoursSince(conv.last_in_at) : silent;
+      const byManager = conv.ai_enabled !== 1 || conv.needs_human === 1;
 
-      if (conv.followup_at && conv.followup_at <= today) {
-        if (await sendNudge(conv, 'followup', { note: conv.followup_note || '' })) {
-          db.prepare('UPDATE conversations SET followup_at=NULL, followup_note=NULL WHERE id=?').run(conv.id);
-          changed = true;
+      // 1. Подтверждение заказа: накануне вечером и утром в день уборки
+      if (cfg.confirmOn && /^\d{4}-\d{2}-\d{2}$/.test(lead.date_iso || '')) {
+        const done = String(conv.confirm_sent || '');
+        const when = lead.date_iso === addDays(today, 1) && nowHour >= eve && !done.includes('eve') ? 'eve'
+          : lead.date_iso === today && nowHour >= morning && !done.includes('morning') ? 'morning' : '';
+        if (when) {
+          const mark = () => db.prepare('UPDATE conversations SET confirm_sent=? WHERE id=?')
+            .run(done ? `${done},${when}` : when, conv.id);
+          const who = lead.name || conv.name || `+${conv.phone}`;
+          const ok = byManager
+            // диалог ведёт человек — подтверждает он сам, бот не лезет в его переписку
+            ? await notifyManagers(`📅 ${when === 'eve' ? 'Завтра' : 'Сегодня'} уборка: ${who}`
+              + `${lead.district ? `, ${lead.district}` : ''}${lead.time ? `, ${lead.time}` : ''}`
+              + `\nПодтвердите с клиентом: ${adminLink(conv.id)}`)
+            : await sendInitiative(conv, 'confirm', { when, date: lead.date_iso, time: lead.time || '', outside: sinceIn > 24 });
+          if (ok) { mark(); changed = true; if (!byManager) sent++; }
+          continue;
+        }
+      }
+
+      // 2. Диалог у менеджера: клиенту от бота не пишем, напоминаем менеджеру
+      if (byManager) {
+        if (conv.last_dir === 'out' && silent >= cfg.managerPing && !recently(conv.mgr_ping_at, 72)) {
+          const who = lead.name || conv.name || `+${conv.phone}`;
+          const ok = await notifyManagers(`⏳ Диалог молчит ${Math.round(silent)} ч — ${who}`
+            + `${lead.price_quote ? `, названа цена ${lead.price_quote}` : ''}\n${adminLink(conv.id)}`);
+          if (ok) {
+            db.prepare("UPDATE conversations SET mgr_ping_at = datetime('now') WHERE id=?").run(conv.id);
+            changed = true;
+          }
         }
         continue;
       }
 
-      if (!on || conv.last_dir !== 'out' || conv.nudges >= max || sent >= PER_RUN) continue;
-      const silent = hoursSince(conv.last_at);
-      if (silent < (conv.nudges === 0 ? first : again)) continue;
-      if (silent > stale) continue;        // это уже не дожим, а сообщение из прошлой жизни
-      if (await sendNudge(conv, 'silence', { hours: Math.round(silent) })) {
+      if (lead.stage === 'отказ') continue;                 // передумал — не преследуем
+      if (nowHour < openHour + 1) continue;                 // в первый час дня не начинаем
+
+      // 3. Напоминание по договорённости: «напишите после ремонта»
+      if (conv.followup_at && conv.followup_at <= today) {
+        if (await sendInitiative(conv, 'followup', { note: conv.followup_note || '', outside: sinceIn > 24 })) {
+          db.prepare('UPDATE conversations SET followup_at=NULL, followup_note=NULL, nudges=0 WHERE id=?').run(conv.id);
+          sent++; changed = true;
+        }
+        continue;
+      }
+
+      // 4. Дожим молчунов
+      if (!cfg.on || conv.last_dir !== 'out') continue;
+      const steps = cadence(lead);
+      const total = Math.min(cfg.max, steps.length);
+      if (conv.nudges >= total) continue;
+      if (silent > cfg.stale) continue;                     // через две недели это уже не дожим
+      if (recently(conv.last_nudge_at, 24)) continue;       // не больше одного письма в сутки
+      // разброс по минутам: иначе в начале дня уходит пачка и выглядит как рассылка
+      if (silent < steps[conv.nudges] + jitterMinutes(conv.id) / 60) continue;
+      // сообщение даже не доставлено — телефон выключен, дожимать бессмысленно
+      if (conv.last_status === 'sent' && silent < 48) continue;
+
+      const touch = conv.nudges + 1;
+      if (await sendInitiative(conv, 'nudge', {
+        touch, total, goal: touchGoal(touch, total),
+        missing: missingFor(lead, conv.media_count > 0),
+        seen: conv.last_status === 'read',
+        hours: Math.round(silent), outside: sinceIn > 24
+      })) {
         db.prepare('UPDATE conversations SET nudges = nudges + 1 WHERE id=?').run(conv.id);
-        changed = true;
-        sent++;
+        sent++; changed = true;
       }
     } catch (e) {
-      console.error('дожим:', e.message);
+      console.error('напоминания:', e.message);
     }
   }
   if (changed) emit('conversations', null);

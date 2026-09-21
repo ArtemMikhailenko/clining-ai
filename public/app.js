@@ -365,7 +365,8 @@ function renderDash() {
         ${funnel(s)}
         <div class="panel-foot"><div class="stg">${s.by_stage.map(([n, v]) =>
           `<span><i style="background:${STAGE_COLOR[n] || 'var(--s1)'}"></i>${esc(n)} <b>${v}</b></span>`).join('')}
-          <span><i style="background:var(--muted)"></i>закрыто <b>${s.closed}</b></span></div></div>
+          <span><i style="background:var(--muted)"></i>закрыто <b>${s.closed}</b></span></div>
+          ${s.nudges ? `<div class="info"><span>Напоминания</span><b>${s.nudges.sent} → ${s.nudges.replied} ответили${s.nudges.sent ? ` · ${Math.round(s.nudges.replied / s.nudges.sent * 100)}%` : ''}</b></div>` : ''}</div>
       </div>
     </div>
     <div class="panels low">
@@ -1044,7 +1045,19 @@ function renderSettings() {
           + srow('Сколько раз максимум', 'Дальше бот молчит: клиент либо ответит, либо заявка закроется сама.',
             unit('f-nudgemax', s.nudge_max ?? 2, 'раза', 0, 5))
           + srow('Не напоминать, если молчит дольше', 'Старые диалоги не трогаем: писать через месяц тишины — это спам, а не дожим.',
-            unit('f-nudgestale', s.nudge_stale_hours ?? 336, 'часов', 24, 2000)))
+            unit('f-nudgestale', s.nudge_stale_hours ?? 336, 'часов', 24, 2000))
+          + srow('Ритм, когда вопрос без ответа', 'Часы от последнего сообщения бота, через запятую. Вопрос остывает быстро, поэтому первое напоминание — в тот же день.',
+            `<input type="text" id="f-stepsask" value="${esc(s.nudge_steps_ask || '3,24,72')}">`)
+          + srow('Ритм, когда цена названа', '«Подумаю» живёт дольше: день, три дня, неделя.',
+            `<input type="text" id="f-stepsquoted" value="${esc(s.nudge_steps_quoted || '24,72,168')}">`)
+          + srow('Стоп-слова', 'Если клиент так написал, бот навсегда перестаёт напоминать ему. По одному на строку.',
+            `<textarea id="f-stopwords" class="mono" rows="4">${esc(s.stop_words || '')}</textarea>`))
+        + grp('Подтверждение заказа', 'Накануне вечером и утром в день уборки бот напомнит клиенту о визите — меньше сорванных выездов. Если диалог ведёт менеджер, напоминание придёт ему, а не клиенту.',
+          srow('Подтверждать заказы', '', `<label class="switch"><input type="checkbox" id="f-confirmon" ${s.confirm_on ? 'checked' : ''}></label>`)
+          + srow('Накануне, в котором часу', '', unit('f-confirmeve', s.confirm_eve_hour ?? 18, 'часов', 8, 22))
+          + srow('В день уборки, в котором часу', '', unit('f-confirmmorning', s.confirm_morning_hour ?? 8, 'часов', 6, 12))
+          + srow('Напомнить менеджеру о тихом диалоге', 'Диалоги, которые ведёт человек, бот не дожимает — вместо этого пишет менеджеру.',
+            unit('f-mgrping', s.manager_ping_hours ?? 48, 'часов', 2, 336)))
         + grp('Промпт', 'Роль, стиль речи, что собирать по заявке, когда звать человека. Цены сюда не вписывайте — они в прайсе.',
           swide(`<textarea id="f-prompt" class="mono" dir="auto" rows="16">${esc(s.system_prompt || '')}</textarea>`))
     },
@@ -1211,6 +1224,9 @@ async function saveSettings() {
   const put = (id, key, tr = (v) => v) => { const el = $(id); if (el) body[key] = tr(el.value); };
   put('#f-company', 'company'); put('#f-tz', 'timezone');
   put('#f-facts', 'business_facts'); put('#f-greeting', 'greeting');
+  put('#f-stepsask', 'nudge_steps_ask'); put('#f-stepsquoted', 'nudge_steps_quoted'); put('#f-stopwords', 'stop_words');
+  put('#f-confirmeve', 'confirm_eve_hour'); put('#f-confirmmorning', 'confirm_morning_hour'); put('#f-mgrping', 'manager_ping_hours');
+  if ($('#f-confirmon')) body.confirm_on = $('#f-confirmon').checked;
   put('#f-nudgestale', 'nudge_stale_hours'); put('#f-nudgeh', 'nudge_hours'); put('#f-nudgerep', 'nudge_repeat_hours'); put('#f-nudgemax', 'nudge_max');
   if ($('#f-nudgeon')) body.nudge_on = $('#f-nudgeon').checked;
   put('#f-managers', 'manager_numbers'); put('#f-adminurl', 'admin_url');
