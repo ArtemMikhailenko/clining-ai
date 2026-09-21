@@ -42,6 +42,9 @@ const Answer = z.object({
   needs_human: z.boolean(),
   // заявка собрана, и в этом же ответе клиенту сказано, что её передают коллеге
   lead_ready: z.boolean(),
+  // «напишите после ремонта», «перезвоните в январе» — дата ГГГГ-ММ-ДД, когда напомнить о себе
+  follow_up_at: z.string(),
+  follow_up_note: z.string(),
   handoff_reason: z.string(),
   summary: z.string(),
   lead: Lead,
@@ -59,6 +62,8 @@ function stubReply(turns) {
       : ['Здравствуйте! Это демо-ответ — ключ ИИ не задан.'],
     needs_human: wantsHuman,
     lead_ready: false,
+    follow_up_at: '',
+    follow_up_note: '',
     handoff_reason: wantsHuman ? 'клиент просит человека' : '',
     summary: (turns.at(-1)?.text || '').slice(0, 90),
     lead: {}
@@ -206,10 +211,24 @@ export async function generateReply(conv, messages, opts = {}) {
     '- needs_human = true, если нужен живой менеджер; в handoff_reason — коротко почему.',
     '- Вопрос «ты бот?» сам по себе — не повод звать менеджера: ответь честно и предложи. Зови, если клиент согласился.',
     '- handoff_reason и summary пиши по-русски, даже если клиент пишет на другом языке: их читает менеджер.',
-    '- summary — суть заявки одной строкой для менеджера: объект, где, что нужно, есть ли видео.'
+    '- summary — суть заявки одной строкой для менеджера: объект, где, что нужно, есть ли видео.',
+    '- Клиент говорит «не сейчас», «после ремонта», «напишите через месяц» — поставь follow_up_at',
+    '  (дата ГГГГ-ММ-ДД, посчитай от сегодняшней) и follow_up_note: своими словами, о чём напомнить.',
+    '  Скажи клиенту, что напишешь в этот день. Если срок не назван — поля пустые.'
   ].join('\n');
 
+  const nudge = opts.nudge;
   const context = [
+    nudge?.kind === 'followup'
+      ? `СЕЙЧАС ТЫ САМА ПИШЕШЬ ПЕРВОЙ: наступил день, о котором договорились${nudge.note ? ` — ${nudge.note}` : ''}.`
+        + ' Напиши ОДНО короткое дружеское сообщение: напомни о себе и спроси, актуальна ли уборка.'
+        + ' Без давления, не повторяй то, что уже говорила.'
+      : '',
+    nudge?.kind === 'silence'
+      ? `СЕЙЧАС ТЫ САМА ПИШЕШЬ ПЕРВОЙ: клиент молчит ${nudge.hours} ч после твоего последнего сообщения.`
+        + ' Напиши ОДНО короткое сообщение: спокойно напомни о себе, спроси, остались ли вопросы,'
+        + ' предложи помощь по цене или дате. Без давления и без упрёков, не повторяй прошлое сообщение дословно.'
+      : '',
     `ОТВЕЧАЙ НА ${lang.toUpperCase()} ЯЗЫКЕ. Каждое сообщение — только на ${lang}.`,
     firstReply
       ? 'Это твой первый ответ. Прямо перед ним клиенту уже ушло приветствие: ты представилась и сказала,'
@@ -269,6 +288,8 @@ export async function generateReply(conv, messages, opts = {}) {
     replies,
     needs_human: Boolean(out.needs_human),
     lead_ready: Boolean(out.lead_ready),
+    follow_up_at: String(out.follow_up_at || '').trim(),
+    follow_up_note: String(out.follow_up_note || '').trim(),
     handoff_reason: out.handoff_reason || '',
     summary: out.summary || '',
     lead: {

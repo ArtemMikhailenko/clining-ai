@@ -120,7 +120,8 @@ export async function handleIncoming({ phone, name, text, wa_id, chat_id = null,
   const body = [text, said].filter(Boolean).join('\n');
 
   const msg = addMessage(conv.id, { direction: 'in', author: 'customer', body, wa_id, media });
-  db.prepare('UPDATE conversations SET unread = unread + 1 WHERE id=?').run(conv.id);
+  // клиент ответил — счётчик напоминаний обнуляем
+  db.prepare('UPDATE conversations SET unread = unread + 1, nudges = 0 WHERE id=?').run(conv.id);
   emit('message', { conv_id: conv.id, message: msg });
   emit('conversations', null);
 
@@ -230,6 +231,12 @@ async function respond(convId, ch, text) {
   db.prepare('UPDATE conversations SET lead=?, summary=?, status=CASE WHEN status=\'new\' THEN \'ai\' ELSE status END WHERE id=?')
     .run(JSON.stringify(lead), out.summary || fresh.summary, conv.id);
 
+  // «напишите после ремонта», «перезвоните в январе» — ставим себе напоминание
+  if (/^\d{4}-\d{2}-\d{2}$/.test(out.follow_up_at || '')) {
+    db.prepare('UPDATE conversations SET followup_at=?, followup_note=?, nudges=0 WHERE id=?')
+      .run(out.follow_up_at, out.follow_up_note || '', conv.id);
+  }
+
   if (out.needs_human) flagHuman(conv.id, out.handoff_reason || 'ИИ передал диалог');
   else if (ready) flagHuman(conv.id, 'заявка готова — посмотреть видео и назвать цену');
 
@@ -288,6 +295,79 @@ async function respond(convId, ch, text) {
  * Ручной ответ оператора. По умолчанию забирает диалог себе (ИИ замолкает) —
  * но иногда надо просто вставить реплику и оставить бота работать, для этого keepAi.
  */
+/* ───── напоминания и дожим ─────
+   Бот сам пишет первым в двух случаях: наступил день, о котором договорились
+   с клиентом, или клиент замолчал после названной цены. Только в рабочие часы —
+   сообщение в три ночи выглядит как спам, а не как забота. */
+const hoursSince = (sqlTime) => (Date.now() - new Date(String(sqlTime).replace(' ', 'T') + 'Z')) / 36e5;
+const todayLocal = () => new Intl.DateTimeFormat('sv-SE', { timeZone: scheduleSetting('timezone') }).format(new Date());
+
+async function sendNudge(conv, kind, extra) {
+  const out = await generateReply(conv, history(conv.id), { nudge: { kind, ...extra } });
+  const text = (out.replies ?? [])[0];
+  if (!text) return false;
+  try {
+    const wa = (await adapterFor(conv).send(conv, text)).wa_id;
+    const msg = addMessage(conv.id, { direction: 'out', author: 'ai', body: text, wa_id: wa });
+    emit('message', { conv_id: conv.id, message: msg });
+    return true;
+  } catch (e) {
+    console.error('напоминание не ушло:', e.message);
+    return false;
+  }
+}
+
+export async function runFollowUps() {
+  if (getSetting('ai_global') !== '1') return;
+  const today = todayLocal();
+  if (!withinWorkHours() || isHoliday(today)) return;
+
+  const rows = db.prepare(`
+    SELECT c.*,
+      (SELECT direction FROM messages m WHERE m.conv_id = c.id ORDER BY m.id DESC LIMIT 1) AS last_dir
+    FROM conversations c
+    WHERE c.status != 'closed' AND c.needs_human = 0 AND c.ai_enabled = 1`).all();
+
+  const on = getSetting('nudge_on') === '1';
+  const first = Number(getSetting('nudge_hours')) || 20;
+  const again = Number(getSetting('nudge_repeat_hours')) || 72;
+  const max = Number(getSetting('nudge_max')) || 2;
+  const stale = Number(getSetting('nudge_stale_hours')) || 336;
+  let changed = false;
+  let sent = 0;
+  const PER_RUN = 10;      // предохранитель: не заваливаем всех разом после перезапуска
+
+  for (const conv of rows) {
+    try {
+      let lead = {};
+      try { lead = JSON.parse(conv.lead || '{}'); } catch {}
+      if (lead.stage === 'отказ') continue;              // передумал — не преследуем
+
+      if (conv.followup_at && conv.followup_at <= today) {
+        if (await sendNudge(conv, 'followup', { note: conv.followup_note || '' })) {
+          db.prepare('UPDATE conversations SET followup_at=NULL, followup_note=NULL WHERE id=?').run(conv.id);
+          changed = true;
+        }
+        continue;
+      }
+
+      if (!on || conv.last_dir !== 'out' || conv.nudges >= max || sent >= PER_RUN) continue;
+      const silent = hoursSince(conv.last_at);
+      if (silent < (conv.nudges === 0 ? first : again)) continue;
+      if (silent > stale) continue;        // это уже не дожим, а сообщение из прошлой жизни
+      if (await sendNudge(conv, 'silence', { hours: Math.round(silent) })) {
+        db.prepare('UPDATE conversations SET nudges = nudges + 1 WHERE id=?').run(conv.id);
+        changed = true;
+        sent++;
+      }
+    } catch (e) {
+      console.error('дожим:', e.message);
+    }
+  }
+  if (changed) emit('conversations', null);
+}
+setInterval(runFollowUps, 6e5).unref?.();     // каждые 10 минут
+
 // раз в час подчищаем заявки, по которым давно нет движения
 setInterval(() => {
   const n = sweepStale();

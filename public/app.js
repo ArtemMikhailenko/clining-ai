@@ -864,6 +864,8 @@ function leadHtml(c) {
       `<option value="${x.k}" ${columnOf(c) === x.k ? 'selected' : ''}>${x.t}</option>`).join('')}</select></dd></div>
     <div class="kv"><dt>Телефон</dt><dd>+${esc(c.phone)}</dd></div>
     <div class="kv"><dt>Имя</dt><dd dir="auto">${esc(l.name || c.name || '—')}</dd></div>
+    ${c.followup_at ? `<div class="kv"><dt>Напомнить</dt><dd>${esc(c.followup_at)}${c.followup_note ? ' · ' + esc(c.followup_note) : ''}</dd></div>` : ''}
+    ${c.nudges ? `<div class="kv"><dt>Напоминаний</dt><dd>${c.nudges}</dd></div>` : ''}
     <div class="kv"><dt>Создана</dt><dd>${dt(c.created_at).toLocaleString('ru-RU', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' })}</dd></div>
     ${rows || '<div class="empty" style="padding:24px 0">ИИ ещё не собрал данные</div>'}
     ${q ? `<div class="sect"><h4>Расчёт по прайсу</h4><div class="calc">
@@ -1032,6 +1034,17 @@ function renderSettings() {
           swide(`<textarea id="f-greeting" dir="auto" rows="5">${esc(s.greeting || '')}</textarea>`))
         + grp('', '', srow('Пауза перед ответом', 'Бот ждёт, пока клиент допишет очередь сообщений, и отвечает один раз на всю пачку.',
           unit('f-delay', Math.round((Number(s.reply_delay) || 4000) / 1000), 'секунд', 1, 60)))
+        + grp('Напоминания и дожим', 'Бот сам пишет первым в двух случаях: наступил день, о котором договорился с клиентом («напишите после ремонта»), или клиент замолчал после названной цены. Пишет только в рабочие часы.',
+          srow('Дожимать молчунов', 'Выключите — останутся только напоминания по договорённости с клиентом.',
+            `<label class="switch"><input type="checkbox" id="f-nudgeon" ${s.nudge_on ? 'checked' : ''}></label>`)
+          + srow('Первое напоминание', 'Через сколько часов тишины после последнего сообщения бота.',
+            unit('f-nudgeh', s.nudge_hours ?? 20, 'часов', 1, 240))
+          + srow('Второе напоминание', 'Через сколько часов после первого.',
+            unit('f-nudgerep', s.nudge_repeat_hours ?? 72, 'часов', 1, 720))
+          + srow('Сколько раз максимум', 'Дальше бот молчит: клиент либо ответит, либо заявка закроется сама.',
+            unit('f-nudgemax', s.nudge_max ?? 2, 'раза', 0, 5))
+          + srow('Не напоминать, если молчит дольше', 'Старые диалоги не трогаем: писать через месяц тишины — это спам, а не дожим.',
+            unit('f-nudgestale', s.nudge_stale_hours ?? 336, 'часов', 24, 2000)))
         + grp('Промпт', 'Роль, стиль речи, что собирать по заявке, когда звать человека. Цены сюда не вписывайте — они в прайсе.',
           swide(`<textarea id="f-prompt" class="mono" dir="auto" rows="16">${esc(s.system_prompt || '')}</textarea>`))
     },
@@ -1198,6 +1211,8 @@ async function saveSettings() {
   const put = (id, key, tr = (v) => v) => { const el = $(id); if (el) body[key] = tr(el.value); };
   put('#f-company', 'company'); put('#f-tz', 'timezone');
   put('#f-facts', 'business_facts'); put('#f-greeting', 'greeting');
+  put('#f-nudgestale', 'nudge_stale_hours'); put('#f-nudgeh', 'nudge_hours'); put('#f-nudgerep', 'nudge_repeat_hours'); put('#f-nudgemax', 'nudge_max');
+  if ($('#f-nudgeon')) body.nudge_on = $('#f-nudgeon').checked;
   put('#f-managers', 'manager_numbers'); put('#f-adminurl', 'admin_url');
   if ($('#f-notifyon')) body.notify_on = $('#f-notifyon').checked;
   put('#f-prompt', 'system_prompt'); put('#f-blocked', 'blocked_numbers'); put('#f-quick', 'quick_replies');

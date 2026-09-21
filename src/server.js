@@ -82,6 +82,11 @@ app.get('/api/state', (req, res) => {
     notify_on: getSetting('notify_on') === '1',
     admin_url: getSetting('admin_url') || process.env.RENDER_EXTERNAL_URL || '',
     stt_label: sttLabel(),
+    nudge_on: getSetting('nudge_on') === '1',
+    nudge_hours: getSetting('nudge_hours'),
+    nudge_repeat_hours: getSetting('nudge_repeat_hours'),
+    nudge_max: getSetting('nudge_max'),
+    nudge_stale_hours: getSetting('nudge_stale_hours'),
     business_facts: getSetting('business_facts'),
     price_list: getSetting('price_list') || JSON.stringify(priceList(), null, 2),
     reply_delay: getSetting('reply_delay'),
@@ -107,6 +112,10 @@ app.post('/api/state', (req, res) => {
   if ('manager_numbers' in req.body) setSetting('manager_numbers', String(req.body.manager_numbers));
   if ('notify_on' in req.body) setSetting('notify_on', req.body.notify_on ? '1' : '0');
   if ('admin_url' in req.body) setSetting('admin_url', String(req.body.admin_url).trim());
+  if ('nudge_on' in req.body) setSetting('nudge_on', req.body.nudge_on ? '1' : '0');
+  for (const k of ['nudge_hours', 'nudge_repeat_hours', 'nudge_max', 'nudge_stale_hours']) {
+    if (k in req.body) setSetting(k, String(Number(req.body[k]) || 0));
+  }
   if ('business_facts' in req.body) setSetting('business_facts', String(req.body.business_facts));
   if ('reply_delay' in req.body) setSetting('reply_delay', String(Number(req.body.reply_delay) || 4000));
   if ('price_list' in req.body) {

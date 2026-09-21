@@ -56,6 +56,10 @@ if (!mcols.includes('media')) db.exec('ALTER TABLE messages ADD COLUMN media TEX
 if (!cols.includes('note')) db.exec('ALTER TABLE conversations ADD COLUMN note TEXT');  // заметка менеджера
 // когда менеджеру ушло уведомление о передаче — чтобы не слать его повторно
 if (!cols.includes('notified_at')) db.exec('ALTER TABLE conversations ADD COLUMN notified_at TEXT');
+// напоминания: когда написать («клиент просил после ремонта») и сколько дожимов уже ушло
+if (!cols.includes('followup_at')) db.exec('ALTER TABLE conversations ADD COLUMN followup_at TEXT');
+if (!cols.includes('followup_note')) db.exec('ALTER TABLE conversations ADD COLUMN followup_note TEXT');
+if (!cols.includes('nudges')) db.exec('ALTER TABLE conversations ADD COLUMN nudges INTEGER NOT NULL DEFAULT 0');
 
 const DEFAULT_PROMPT = `Ты — Лея, помощница компании по уборке после ремонта. Переписываешься с клиентами в WhatsApp.
 Клиенты приходят с рекламы, первое сообщение часто шаблонное: «Здравствуйте, интересует уборка».
@@ -171,6 +175,12 @@ seed.run('blocked_numbers', '');
 seed.run('manager_numbers', '');
 seed.run('notify_on', '1');
 seed.run('admin_url', '');   // для ссылки на диалог; на Render берётся из RENDER_EXTERNAL_URL
+// Дожим: если клиент замолчал после цены, бот сам напомнит о себе. Только в рабочие часы.
+seed.run('nudge_on', '1');
+seed.run('nudge_hours', '20');          // через сколько часов тишины первое напоминание
+seed.run('nudge_repeat_hours', '72');   // через сколько после него второе
+seed.run('nudge_max', '2');             // больше двух раз не напоминаем
+seed.run('nudge_stale_hours', '336');   // молчит дольше двух недель — напоминать поздно
 // Пауза перед ответом: за неё бот успевает дождаться, пока клиент допишет
 // очередь коротких сообщений, и отвечает один раз на всю пачку.
 seed.run('reply_delay', String(process.env.REPLY_DELAY_MS ?? 4000));
