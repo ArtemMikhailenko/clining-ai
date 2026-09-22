@@ -277,8 +277,29 @@ export async function generateReply(conv, messages, opts = {}) {
 
   // некоторые модели дважды экранируют юникод — «₪» вместо «₪»
   const unescape = (t) => String(t).replace(/\\u([0-9a-fA-F]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16))).trim();
-  // длинное тире и многоточие — заметный след «писал ИИ»: в мессенджере так не печатают
-  const human = (t) => t.replace(/\s*[—–]\s*/g, ' - ').replace(/…/g, '...').replace(/ {2,}/g, ' ').trim();
+  /**
+   * Приводим ответ модели к виду, в котором люди пишут в мессенджере.
+   * Обратные кавычки WhatsApp показывает моноширинным текстом в разрядку —
+   * клиент видел «П р о с т и т е…». Длинное тире и многоточие — след «писал ИИ».
+   */
+  const human = (t) => {
+    let out = String(t)
+      .replace(/```+[a-z]*\n?/gi, '')                        // код-блок целиком
+      .replace(/`/g, '')
+      .replace(/[    ​]/g, ' ')      // неразрывные и тонкие пробелы
+      .replace(/\s*[—–]\s*/g, ' - ')
+      .replace(/…/g, '...')
+      .trim();
+
+    // Текст «в разрядку»: слова разделены двойным пробелом, буквы — одинарным.
+    // Чиним до схлопывания пробелов, иначе границы слов теряются.
+    const letters = out.split(/\s+/).filter(Boolean);
+    if (letters.length > 6 && letters.filter((w) => w.length === 1).length / letters.length > 0.6) {
+      out = out.split(/ {2,}/).map((word) => word.replace(/(\S) (?=\S)/g, '$1')).join(' ');
+    }
+    return out.replace(/ {2,}/g, ' ').trim();
+  };
+
   let replies = (out.messages || []).map((t) => human(unescape(t))).filter(Boolean).slice(0, 2);
   // Один вопрос за ход. Модели (даже сильные) любят спросить два пункта сразу,
   // разнеся их по двум сообщениям, — клиенту это как анкета. Оставляем первый
