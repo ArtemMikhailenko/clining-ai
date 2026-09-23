@@ -1,4 +1,4 @@
-import { db, addMessage, getOrCreateConversation, getConversation, history, getSetting, messageExists } from './db.js';
+import { db, addMessage, getOrCreateConversation, getConversation, history, getSetting, messageExists, setSource } from './db.js';
 import { generateReply } from './ai.js';
 import { channel, adapterFor } from './channels/index.js';
 import { detectLang } from './lang.js';
@@ -46,6 +46,26 @@ function pickGreeting(text) {
   const fill = (s) => s.replaceAll('{company}', getSetting('company') || '');
   if (!map.size) return fill(raw);                 // одна строка без префикса — как есть
   return fill(map.get(detectLang(text)) ?? map.get('ru') ?? [...map.values()][0]);
+}
+
+/**
+ * Метка источника в тексте: ссылки вида wa.me/…?text=…%20%23avito приводят
+ * клиента с решёткой в первом сообщении. Работает там, где карточки рекламы нет.
+ */
+function tagSource(text) {
+  const m = /(?:^|\s)#([a-zа-я0-9_-]{2,20})/i.exec(String(text || ''));
+  return m ? { source: 'Метка ' + m[1].toLowerCase(), title: '', url: '', ref: m[1] } : null;
+}
+
+/**
+ * Площадь, которой не бывает. Модель умеет склеить «8 комнат по 50 м + балкон
+ * 100 м²» в 850100 — и прайс честно умножит это на ставку. Такую цифру не
+ * пропускаем: цена по ней уходит клиенту и стоит денег.
+ */
+const AREA_MIN = 5, AREA_MAX = 1500;
+function saneArea(lead) {
+  const n = Number(String(lead.area_m2 || '').replace(/[^\d.]/g, ''));
+  return !n || (n >= AREA_MIN && n <= AREA_MAX);
 }
 
 /** Что увидели на видео — сразу в карточку заявки, чтобы менеджер не пересматривал. */
@@ -100,7 +120,7 @@ function scheduleReply(convId, ch, text) {
 }
 
 /** Входящее сообщение клиента: сохранить → при включённом ИИ поставить ответ в очередь. */
-export async function handleIncoming({ phone, name, text, wa_id, chat_id = null, media = [] }, ch = channel) {
+export async function handleIncoming({ phone, name, text, wa_id, chat_id = null, media = [], ref = null }, ch = channel) {
   if (messageExists(wa_id)) return;   // повторная доставка того же вебхука
   if (blocked(phone)) {
     // вложение канал уже сохранил на диск — за номером из чёрного списка не храним
@@ -108,6 +128,8 @@ export async function handleIncoming({ phone, name, text, wa_id, chat_id = null,
     return;
   }
   const conv = getOrCreateConversation(ch.name, phone, name, chat_id);
+  // откуда клиент: карточка объявления от WhatsApp или метка #… в тексте ссылки
+  setSource(conv.id, ref || tagSource(text));
 
   // Голосовые: расшифровываем в текст, дальше бот работает с ним как с обычным
   // сообщением. Сам файл остаётся в диалоге — менеджер может послушать.
@@ -233,6 +255,12 @@ async function respond(convId, ch, text) {
   if (ready) lead.stage = 'заявка готова';
   // Цену считает код. Если модель записала в карточку свою сумму и она вдвое
   // больше расчёта — верим расчёту: иначе в воронке висят миллионы.
+  if (!saneArea(lead)) {
+    const wrong = lead.area_m2;
+    lead.area_m2 = '';
+    flagHuman(conv.id, `непонятная площадь: «${wrong}» — уточните у клиента`);
+    addMessage(conv.id, { direction: 'out', author: 'system', body: `Площадь «${wrong}» на расчёт не похожа — цена по ней не считалась` });
+  }
   const q = quote(lead);
   if (q) {
     const told = Number(String(lead.price_quote || '').replace(/[^\d]/g, ''));
@@ -372,10 +400,10 @@ export async function runFollowUps() {
 
       // 1. Подтверждение заказа: накануне вечером и утром в день уборки
       // напоминаем о визите только по заказам, которые менеджер подтвердил
-      if (cfg.confirmOn && lead.stage === 'дата согласована' && /^\d{4}-\d{2}-\d{2}$/.test(lead.date_iso || '')) {
+      if (cfg.confirmOn && /^\d{4}-\d{2}-\d{2}$/.test(conv.job_date || '')) {
         const done = String(conv.confirm_sent || '');
-        const when = lead.date_iso === addDays(today, 1) && nowHour >= eve && !done.includes('eve') ? 'eve'
-          : lead.date_iso === today && nowHour >= morning && !done.includes('morning') ? 'morning' : '';
+        const when = conv.job_date === addDays(today, 1) && nowHour >= eve && !done.includes('eve') ? 'eve'
+          : conv.job_date === today && nowHour >= morning && !done.includes('morning') ? 'morning' : '';
         if (when) {
           const mark = () => db.prepare('UPDATE conversations SET confirm_sent=? WHERE id=?')
             .run(done ? `${done},${when}` : when, conv.id);
@@ -383,9 +411,9 @@ export async function runFollowUps() {
           const ok = byManager
             // диалог ведёт человек — подтверждает он сам, бот не лезет в его переписку
             ? await notifyManagers(`📅 ${when === 'eve' ? 'Завтра' : 'Сегодня'} уборка: ${who}`
-              + `${lead.district ? `, ${lead.district}` : ''}${lead.time ? `, ${lead.time}` : ''}`
+              + `${lead.district ? `, ${lead.district}` : ''}${conv.job_time ? `, ${conv.job_time}` : ''}`
               + `\nПодтвердите с клиентом: ${adminLink(conv.id)}`)
-            : await sendInitiative(conv, 'confirm', { when, date: lead.date_iso, time: lead.time || '', outside: sinceIn > 24 });
+            : await sendInitiative(conv, 'confirm', { when, date: conv.job_date, time: conv.job_time || '', outside: sinceIn > 24 });
           if (ok) { mark(); changed = true; if (!byManager) sent++; }
           continue;
         }

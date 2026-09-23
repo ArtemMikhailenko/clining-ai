@@ -1,11 +1,11 @@
 import express from 'express';
 import path from 'node:path';
-import { db, listConversations, getConversation, history, getSetting, setSetting, addMessage } from './db.js';
+import { db, listConversations, getConversation, history, getSetting, setSetting, addMessage, resetData } from './db.js';
 import { handleIncoming, sendAsHuman, suggestReply, subscribe, emit } from './bot.js';
 import * as botState from './bot.js';
 import { channel, channels } from './channels/index.js';
 import { saveMedia } from './media.js';
-import { withinWorkHours, scheduleSetting, workHours, holidays, isHoliday } from './schedule.js';
+import { withinWorkHours, scheduleSetting, workHours, holidays, isHoliday, workingSeconds } from './schedule.js';
 import { quote, priceList } from './pricing.js';
 import { waStatus, onStatus, requestPairing, logout as waLogout, restart as waRestart } from './channels/baileys.js';
 import { sttLabel } from './stt.js';
@@ -177,9 +177,12 @@ app.get('/api/stats', (req, res) => {
       (SELECT min(created_at) FROM messages m WHERE m.conv_id=c.id AND m.direction='out' AND m.author='ai') AS first_out
     FROM conversations c WHERE c.created_at >= datetime('now', ?)`).all(since)
     .filter((r) => r.first_in && r.first_out)
-    .map((r) => (new Date(r.first_out + 'Z') - new Date(r.first_in + 'Z')) / 1000)
-    .filter((s) => s >= 0);
-  const avgReply = react.length ? Math.round(react.reduce((a, b) => a + b, 0) / react.length) : 0;
+    // считаем в рабочих часах: ночная пауза — не медлительность бота.
+    // медиана, а не среднее: один зависший диалог не должен красить всю картину
+    .map((r) => workingSeconds(new Date(r.first_in + 'Z'), new Date(r.first_out + 'Z')))
+    .filter((s) => s >= 0)
+    .sort((a, b) => a - b);
+  const avgReply = react.length ? Math.round(react[Math.floor(react.length / 2)]) : 0;
 
   const photos = db.prepare(`
     SELECT count(*) n FROM messages m JOIN conversations c ON c.id = m.conv_id
@@ -236,7 +239,8 @@ app.get('/api/stats', (req, res) => {
     photos,
     by_service: group((c) => c.l.service),
     by_district: group((c) => c.l.district).slice(0, 6),
-    by_stage: group((c) => c.l.stage)
+    by_stage: group((c) => c.l.stage),
+    by_source: group((c) => c.source || 'не определён')
   });
 });
 
@@ -277,6 +281,23 @@ app.post('/api/conversations/:id/lead', (req, res) => {
   if (lead.date_iso && !/^\d{4}-\d{2}-\d{2}$/.test(lead.date_iso)) {
     return res.status(400).json({ error: 'Дата должна быть в виде ГГГГ-ММ-ДД' });
   }
+
+  // Запись на уборку подтверждает человек: дату из карточки бот только предлагает.
+  // Поставили дату — заявка переходит в «дата согласована», сняли — возвращается.
+  if ('job_date' in req.body || 'job_time' in req.body) {
+    const jd = String(req.body.job_date ?? conv.job_date ?? '').trim();
+    if (jd && !/^\d{4}-\d{2}-\d{2}$/.test(jd)) {
+      return res.status(400).json({ error: 'Дата должна быть в виде ГГГГ-ММ-ДД' });
+    }
+    const jt = String(req.body.job_time ?? conv.job_time ?? '').trim();
+    db.prepare('UPDATE conversations SET job_date=?, job_time=?, confirm_sent=CASE WHEN job_date IS ? THEN confirm_sent ELSE NULL END WHERE id=?')
+      .run(jd || null, jt || null, jd || null, id);
+    if (jd && lead.stage !== 'отказ') lead.stage = 'дата согласована';
+    if (!jd && lead.stage === 'дата согласована') lead.stage = 'готов к заказу';
+  }
+  if ('source' in req.body) {
+    db.prepare('UPDATE conversations SET source=? WHERE id=?').run(String(req.body.source ?? '').trim() || null, id);
+  }
   db.prepare('UPDATE conversations SET lead=? WHERE id=?').run(JSON.stringify(lead), id);
   emit('conversations', null);
   res.json({ ...getConversation(id), quote: quote(lead) });
@@ -293,14 +314,16 @@ app.post('/api/conversations/:id/note', (req, res) => {
 app.get('/api/holidays', (req, res) => res.json(holidays()));
 
 app.get('/api/schedule', (req, res) => {
-  const rows = db.prepare("SELECT * FROM conversations WHERE status != 'closed'").all()
+  // в расписание попадает только подтверждённая запись (job_date), а не
+  // пожелание клиента из карточки: «хочу в субботу» — это ещё не заказ
+  const rows = db.prepare("SELECT * FROM conversations WHERE status != 'closed' AND job_date IS NOT NULL AND job_date != ''").all()
     .map((c) => ({ ...c, l: JSON.parse(c.lead || '{}') }))
-    .filter((c) => /^\d{4}-\d{2}-\d{2}$/.test(c.l.date_iso || ''))
+    .filter((c) => /^\d{4}-\d{2}-\d{2}$/.test(c.job_date || ''))
     .map((c) => ({
-      id: c.id, phone: c.phone, name: c.l.name || c.name, date: c.l.date_iso, time: c.l.time || '',
+      id: c.id, phone: c.phone, name: c.l.name || c.name, date: c.job_date, time: c.job_time || '',
       service: c.l.service || '', area: c.l.area_m2 || '', district: c.l.district || '',
-      price: c.l.price_quote || '', stage: c.l.stage || '', confirmed: c.status === 'human',
-      holiday: Boolean(isHoliday(c.l.date_iso))
+      price: c.l.price_quote || '', stage: c.l.stage || '', confirmed: true,
+      holiday: Boolean(isHoliday(c.job_date))
     }))
     .sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time));
   res.json(rows);
@@ -385,6 +408,20 @@ app.post('/api/conversations/:id/status', (req, res) => {
 });
 
 /* ─────────── Симулятор клиента ─────────── */
+/**
+ * Стереть переписку и заявки перед запуском рекламы. Настройки, прайс и
+ * привязка WhatsApp остаются — иначе после сброса бота пришлось бы настраивать заново.
+ */
+app.post('/api/maintenance/reset', (req, res) => {
+  if (String(req.body?.confirm ?? '') !== 'СТЕРЕТЬ') {
+    return res.status(400).json({ error: 'Не подтверждено' });
+  }
+  const gone = resetData();
+  emit('conversations', null);
+  console.log(`Данные стёрты: диалогов ${gone.conversations}, сообщений ${gone.messages}, файлов ${gone.files}`);
+  res.json(gone);
+});
+
 app.post('/api/sim/incoming', async (req, res) => {
   const { from, name, text, image } = req.body || {};
   if (!from || (!text && !image)) return res.status(400).json({ error: 'нужен текст или фото' });
@@ -399,7 +436,8 @@ app.post('/api/sim/incoming', async (req, res) => {
   }
   // симулятор всегда пишет в канал mock — ответ никуда наружу не уходит,
   // даже когда боевой WhatsApp подключён
-  await handleIncoming({ phone: String(from), name: name || null, text: String(text || ''), media, wa_id: 'sim-' + Date.now() }, channels.mock);
+  await handleIncoming({ phone: String(from), name: name || null, text: String(text || ''), media,
+    wa_id: 'sim-' + Date.now(), ref: req.body.ref || null }, channels.mock);
   const conv = db.prepare('SELECT * FROM conversations WHERE channel=? AND phone=?').get('mock', String(from));
   res.json({ ok: true, conv_id: conv?.id, messages: conv ? history(conv.id, 200) : [] });
 });

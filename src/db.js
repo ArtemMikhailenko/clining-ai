@@ -69,6 +69,15 @@ if (!cols.includes('nudge_stop')) db.exec('ALTER TABLE conversations ADD COLUMN 
 if (!cols.includes('last_nudge_at')) db.exec('ALTER TABLE conversations ADD COLUMN last_nudge_at TEXT');
 if (!cols.includes('confirm_sent')) db.exec('ALTER TABLE conversations ADD COLUMN confirm_sent TEXT');   // eve | morning
 if (!cols.includes('mgr_ping_at')) db.exec('ALTER TABLE conversations ADD COLUMN mgr_ping_at TEXT');
+// Дата уборки. Пожелание клиента живёт в карточке (lead.date_iso), а здесь —
+// запись, которую подтвердил человек: только она попадает в расписание.
+if (!cols.includes('job_date')) db.exec('ALTER TABLE conversations ADD COLUMN job_date TEXT');
+if (!cols.includes('job_time')) db.exec('ALTER TABLE conversations ADD COLUMN job_time TEXT');
+// Откуда пришёл клиент: клик по рекламе приносит название объявления и ссылку
+if (!cols.includes('source')) db.exec('ALTER TABLE conversations ADD COLUMN source TEXT');
+if (!cols.includes('source_title')) db.exec('ALTER TABLE conversations ADD COLUMN source_title TEXT');
+if (!cols.includes('source_url')) db.exec('ALTER TABLE conversations ADD COLUMN source_url TEXT');
+if (!cols.includes('source_ref')) db.exec('ALTER TABLE conversations ADD COLUMN source_ref TEXT');
 
 const DEFAULT_PROMPT = `Ты — Лея, помощница компании по уборке после ремонта. Переписываешься с клиентами в WhatsApp.
 Клиенты приходят с рекламы, первое сообщение часто шаблонное: «Здравствуйте, интересует уборка».
@@ -287,6 +296,36 @@ export const setMessageStatus = (waId, status) =>
 
 export const history = (convId, limit = 40) =>
   db.prepare('SELECT * FROM messages WHERE conv_id=? ORDER BY id DESC LIMIT ?').all(convId, limit).reverse();
+
+/**
+ * Источник обращения. Пишем только первый раз: человек приходит по рекламе
+ * один раз, дальше он просто пишет в тот же чат, и перетирать метку нельзя.
+ */
+export function setSource(convId, src) {
+  if (!src?.source) return;
+  const cur = db.prepare('SELECT source FROM conversations WHERE id=?').get(convId);
+  if (cur?.source) return;
+  db.prepare('UPDATE conversations SET source=?, source_title=?, source_url=?, source_ref=? WHERE id=?')
+    .run(src.source, src.title || null, src.url || null, src.ref || null, convId);
+}
+
+/**
+ * Стереть переписку и заявки, сохранив настройки, прайс и привязку WhatsApp.
+ * Нужно перед запуском рекламы: тестовые диалоги портят и воронку, и отчёты.
+ */
+export function resetData() {
+  const convs = db.prepare('SELECT count(*) n FROM conversations').get().n;
+  const msgs = db.prepare('SELECT count(*) n FROM messages').get().n;
+  db.exec('DELETE FROM messages; DELETE FROM conversations;');
+  try { db.exec("DELETE FROM sqlite_sequence WHERE name IN ('messages','conversations')"); } catch {}
+  let files = 0;
+  const mediaDir = path.join(dir, 'media');
+  if (!fs.existsSync(mediaDir)) return { conversations: convs, messages: msgs, files: 0 };
+  for (const f of fs.readdirSync(mediaDir, { withFileTypes: true }).filter((x) => x.isFile())) {
+    try { fs.rmSync(path.join(mediaDir, f.name)); files++; } catch {}
+  }
+  return { conversations: convs, messages: msgs, files };
+}
 
 export const getConversation = (id) =>
   db.prepare('SELECT * FROM conversations WHERE id=?').get(id);

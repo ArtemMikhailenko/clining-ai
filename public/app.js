@@ -209,12 +209,12 @@ function renderHeaderStats() {
 /** Выгрузка заявок для бухгалтерии или переноса в другую систему. */
 function exportCsv() {
   const rows = convs.filter(matches);
-  const head = ['Клиент', 'Телефон', 'Уборка', 'м²', 'Комнат', 'Санузлов', 'Район', 'Дата', 'Цена', 'Стадия', 'Обновлена'];
+  const head = ['Клиент', 'Телефон', 'Уборка', 'м²', 'Комнат', 'Санузлов', 'Район', 'Хочет', 'Записан', 'Цена', 'Источник', 'Стадия', 'Обновлена'];
   const esc2 = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
   const body = rows.map((c) => {
     const l = lead(c);
     return [l.name || c.name || '', '+' + c.phone, l.service, l.area_m2, l.rooms_count, l.bathrooms,
-      l.district, l.date, l.price_quote, colTitle(columnOf(c)), c.last_at].map(esc2).join(';');
+      l.district, l.date, c.job_date, l.price_quote, c.source, colTitle(columnOf(c)), c.last_at].map(esc2).join(';');
   });
   // BOM, иначе Excel не понимает кириллицу в UTF-8
   const blob = new Blob(['\uFEFF' + [head.map(esc2).join(';'), ...body].join('\n')], { type: 'text/csv' });
@@ -352,7 +352,9 @@ function renderDash() {
       ${kpi('var(--s4)', 'wallet', 'Средний чек',
         `<div class="v">${s.avg_check ? s.avg_check.toLocaleString('ru-RU') + '<small>₪</small>' : '—'}${delta(s.avg_check, prev.avg_check)}</div>`,
         'по названным ценам')}
-      ${kpi('var(--accent)', 'bolt', 'Ответ бота', `<div class="v">${secs ? secs + '<small>с</small>' : '—'}</div>`, 'в среднем')}
+      ${kpi('var(--accent)', 'bolt', 'Ответ бота',
+        `<div class="v">${secs ? (secs < 120 ? secs + '<small>с</small>' : Math.round(secs / 60) + '<small>мин</small>') : '—'}</div>`,
+        'медиана, рабочие часы')}
       ${kpi('var(--s5)', 'camera', 'Фото от клиентов', `<div class="v">${s.photos}</div>`, 'за период')}
     </div>
     <div class="panels top">
@@ -374,6 +376,7 @@ function renderDash() {
         <div id="dash-jobs" class="joblist"></div></div>
       <div class="panel"><div class="ph"><div><h3>Типы уборки</h3><div class="s">по всем заявкам периода</div></div></div>${hbars(s.by_service, 'var(--s1)')}</div>
       <div class="panel"><div class="ph"><div><h3>Районы</h3><div class="s">откуда пишут клиенты</div></div></div>${hbars(s.by_district, 'var(--accent)')}</div>
+      <div class="panel"><div class="ph"><div><h3>Источники</h3><div class="s">с какой рекламы пришёл клиент</div></div></div>${hbars(s.by_source || [], 'var(--s4)')}</div>
     </div>`;
 
   // ближайшие заказы: сводка должна отвечать и на вопрос «что сегодня делать»
@@ -803,8 +806,11 @@ async function send(root) {
 
 /* ───── карточка заявки ───── */
 const LABELS = { service:'Тип уборки', object_type:'Объект', area_m2:'Площадь, м²', rooms_count:'Комнат',
-  bathrooms:'Санузлов', district:'Район', address:'Адрес', works:'Что сделать', date:'Дата', windows:'Мыть окна', condition:'Загрязнение',
-  price_quote:'Названа цена', stage:'Стадия' };
+  bathrooms:'Санузлов', district:'Район', address:'Адрес', works:'Что сделать', date:'Хочет убрать',
+  windows:'Мыть окна', condition:'Загрязнение', price_quote:'Названа цена', stage:'Стадия' };
+
+// поля диалога, а не карточки: запись подтверждает человек, источник приходит с рекламы
+const CONV_KEYS = new Set(['job_date', 'job_time', 'source']);
 
 // что можно править руками и чем: ИИ ошибается, а по телефону он не слышит
 const EDITABLE = [
@@ -817,8 +823,11 @@ const EDITABLE = [
   ['district', 'Район', 'text'],
   ['address', 'Адрес', 'text'],
   ['works', 'Что сделать', 'text'],
-  ['date_iso', 'Дата заказа', 'date'],
-  ['time', 'Время', 'text'],
+  ['date_iso', 'Желаемая дата', 'date'],
+  ['time', 'Желаемое время', 'text'],
+  ['job_date', 'Записан на', 'date'],
+  ['job_time', 'Время записи', 'text'],
+  ['source', 'Источник', 'text'],
   ['windows', 'Мыть окна', 'select', ['', 'да', 'нет']],
   ['condition', 'Загрязнение', 'select', ['', 'лёгкое', 'среднее', 'сильное', 'после ремонта']],
   ['price_quote', 'Названа цена', 'text'],
@@ -827,11 +836,12 @@ const EDITABLE = [
 
 function leadFormHtml(c) {
   const l = lead(c);
+  const val = (k) => (CONV_KEYS.has(k) ? c[k] : l[k]) || '';
   return `<div class="lead"><form class="leadform" data-r="leadform">
     ${EDITABLE.map(([k, t, type, opts]) => `<label class="lf"><span>${t}</span>
       ${type === 'select'
         ? `<select name="${k}">${opts.map((o) => `<option value="${esc(o)}" ${l[k] === o ? 'selected' : ''}>${o || '—'}</option>`).join('')}</select>`
-        : `<input name="${k}" type="${type}" dir="auto" value="${esc(l[k] || '')}">`}</label>`).join('')}
+        : `<input name="${k}" type="${type}" dir="auto" value="${esc(val(k))}">`}</label>`).join('')}
     <div class="lf-foot">
       <button type="button" class="btn" data-a="lead-cancel">Отмена</button>
       <button type="submit" class="btn primary">Сохранить</button>
@@ -865,6 +875,12 @@ function leadHtml(c) {
       `<option value="${x.k}" ${columnOf(c) === x.k ? 'selected' : ''}>${x.t}</option>`).join('')}</select></dd></div>
     <div class="kv"><dt>Телефон</dt><dd>+${esc(c.phone)}</dd></div>
     <div class="kv"><dt>Имя</dt><dd dir="auto">${esc(l.name || c.name || '—')}</dd></div>
+    <div class="kv"><dt>Записан на</dt><dd>${c.job_date
+      ? esc(c.job_date + (c.job_time ? ', ' + c.job_time : '')) + ' <span class="ok-tag">подтверждено</span>'
+      : '<span class="muted">не записан — дату подтверждает менеджер</span>'}</dd></div>
+    ${c.source ? `<div class="kv"><dt>Источник</dt><dd dir="auto">${c.source_url
+      ? `<a href="${esc(c.source_url)}" target="_blank" rel="noopener">${esc(c.source)}</a>` : esc(c.source)}${
+      c.source_title ? ` · ${esc(c.source_title)}` : ''}</dd></div>` : ''}
     ${c.followup_at ? `<div class="kv"><dt>Напомнить</dt><dd>${esc(c.followup_at)}${c.followup_note ? ' · ' + esc(c.followup_note) : ''}</dd></div>` : ''}
     ${c.nudges ? `<div class="kv"><dt>Напоминаний</dt><dd>${c.nudges}</dd></div>` : ''}
     <div class="kv"><dt>Создана</dt><dd>${dt(c.created_at).toLocaleString('ru-RU', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' })}</dd></div>
@@ -976,6 +992,8 @@ const SET_SECTIONS = [
     i:'<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>' },
   { k:'access', t:'Доступ', d:'чёрный список, уведомления',
     i:'<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/>' },
+  { k:'data', t:'Данные', d:'сброс перед рекламой',
+    i:'<ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>' },
   { k:'conn', t:'Подключения', d:'WhatsApp, модель, QR',
     i:'<path d="M9 2v6M15 2v6M6 8h12v4a6 6 0 0 1-12 0zM12 18v4"/>' }
 ];
@@ -1100,6 +1118,12 @@ function renderSettings() {
         + srow('Адрес админки', 'Для ссылки на диалог в уведомлении. На Render подставляется сам.',
           `<input type="text" id="f-adminurl" value="${esc(s.admin_url || '')}" placeholder="https://clining-ai.onrender.com">`))
     },
+    data: {
+      lead: 'Перед запуском рекламы переписку лучше стереть: тестовые диалоги портят воронку, средний чек и отчёты. Настройки, прайс, расписание и привязка WhatsApp останутся на месте.',
+      body: grp('Сброс переписки', 'Удаляются все диалоги, сообщения, заявки и присланные файлы. Отменить нельзя, копии не остаётся.',
+        srow('Стереть данные', 'Спросим подтверждение: нужно будет набрать слово СТЕРЕТЬ.',
+          '<button class="btn danger" id="f-wipe">Стереть все диалоги</button>'))
+    },
     conn: {
       lead: 'Канал и модель задаются в файле <code>.env</code> и требуют перезапуска сервера.',
       body: grp('', '', `<div class="ctiles">
@@ -1152,6 +1176,17 @@ function renderSettings() {
     $('#f-notify').textContent = p === 'granted' ? 'Уведомления включены' : 'Браузер отказал';
   });
   $('#f-qr') && ($('#f-qr').onclick = () => showQr(waState));
+  $('#f-wipe') && ($('#f-wipe').onclick = async () => {
+    const n = (await api('/api/conversations')).length;
+    if (!confirm(`Стереть ${n} ${plural(n, 'диалог', 'диалога', 'диалогов')} со всей перепиской и файлами?\n\nНастройки, прайс и подключение WhatsApp останутся.`)) return;
+    if (prompt('Наберите СТЕРЕТЬ, чтобы подтвердить') !== 'СТЕРЕТЬ') return toast('Отменено');
+    try {
+      const gone = await api('/api/maintenance/reset', { method: 'POST', body: JSON.stringify({ confirm: 'СТЕРЕТЬ' }) });
+      toast(`Стёрто: ${gone.conversations} ${plural(gone.conversations, 'диалог', 'диалога', 'диалогов')}, ${gone.messages} ${plural(gone.messages, 'сообщение', 'сообщения', 'сообщений')}`);
+      convs = [];
+      loadList();
+    } catch (e) { toast(e.message, true); }
+  });
   if ($('#i-wa')) {
     const [t, cls] = WA[waState.state] || ['—', ''];
     $('#i-wa').textContent = t;

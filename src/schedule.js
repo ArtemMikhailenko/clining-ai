@@ -85,6 +85,34 @@ export function withinWorkHours(at = new Date()) {
   return from <= to ? now.min >= from && now.min < to : now.min >= from || now.min < to;
 }
 
+/**
+ * Сколько рабочих секунд прошло между двумя моментами. Ночь, выходные и
+ * праздники не считаем: иначе письмо в 23:10 и ответ в 08:05 выглядят как
+ * девять часов молчания, и метрика скорости ответа теряет смысл.
+ */
+export function workingSeconds(from, to) {
+  if (!(to > from)) return 0;
+  const h = workHours();
+  const hol = new Set(holidays().map((x) => x.date));
+  let sec = 0;
+  let cursor = new Date(from);
+  for (let guard = 0; cursor < to && guard < 400; guard++) {
+    const p = localParts(cursor);
+    if (!p) return Math.round((to - from) / 1000);          // неизвестный пояс — как есть
+    const nextDay = new Date(cursor.getTime() + (1440 - p.min) * 60000);
+    const end = nextDay < to ? nextDay : to;
+    const win = hol.has(p.date) ? null : h[p.day];
+    if (Array.isArray(win)) {
+      const open = toMin(win[0]);
+      const close = toMin(win[1]) > open ? toMin(win[1]) : 1440;   // смена через полночь — до конца суток
+      const endMin = p.min + (end - cursor) / 60000;
+      sec += Math.max(0, Math.min(endMin, close) - Math.max(p.min, open)) * 60;
+    }
+    cursor = end;
+  }
+  return Math.round(sec);
+}
+
 /** График человеческим текстом — уходит в промпт, чтобы бот не выдумывал часы. */
 export function scheduleText() {
   const h = workHours();

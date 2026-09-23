@@ -47,6 +47,36 @@ function textOf(msg) {
     ?? null;
 }
 
+/**
+ * Откуда пришёл клиент. Клик по рекламе в Facebook или Instagram приносит
+ * вместе с первым сообщением карточку объявления: заголовок, ссылку и
+ * идентификатор клика. Без этого в CRM все лиды выглядят одинаково.
+ */
+function refOf(msg) {
+  const m = msg.message ?? {};
+  const ctx = m.extendedTextMessage?.contextInfo ?? m.imageMessage?.contextInfo
+    ?? m.videoMessage?.contextInfo ?? m.audioMessage?.contextInfo ?? m.documentMessage?.contextInfo ?? null;
+  const ad = ctx?.externalAdReply;
+  const entry = ctx?.entryPointConversionSource || '';
+  if (!ad && !entry) return null;
+
+  const url = ad?.sourceUrl || '';
+  let utm = '';
+  try { utm = new URL(url).searchParams.get('utm_source') || ''; } catch {}
+  // sourceApp: FB | IG; entryPointConversionSource: ctwa_ad, sources, id_link…
+  const app = ad?.sourceApp || ctx?.entryPointConversionApp || '';
+  const APPS = { FB: 'Facebook', IG: 'Instagram', WhatsApp: 'WhatsApp' };
+  const label = APPS[app] || utm
+    || (entry.includes('ctwa') ? 'Реклама' : entry === 'id_link' ? 'Ссылка' : entry ? entry : 'Реклама');
+
+  return {
+    source: ad ? `Реклама ${label}`.trim() : label,
+    title: ad?.title || ad?.body || '',
+    url,
+    ref: ad?.ctwaClid || ad?.sourceId || ''
+  };
+}
+
 /** Что за вложение пришло: фото, видео или документ. */
 function mediaKind(msg) {
   const m = msg.message ?? {};
@@ -189,7 +219,8 @@ async function connect() {
         text: text ?? '',
         media,
         wa_id: msg.key.id ?? null,
-        chat_id: jid
+        chat_id: jid,
+        ref: refOf(msg)
       });
     }
   });
