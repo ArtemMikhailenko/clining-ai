@@ -227,6 +227,8 @@ async function respond(convId, ch, text) {
 
   const lead = { ...JSON.parse(fresh.lead || '{}'), ...Object.fromEntries(Object.entries(out.lead || {}).filter(([, v]) => v)) };
   // Готовая заявка — без адреса это не заявка, даже если модель поспешила
+  // дату подтверждает человек: бот только записывает пожелание клиента
+  if (lead.stage === 'дата согласована') lead.stage = 'готов к заказу';
   const ready = out.lead_ready && Boolean(lead.district || lead.address);
   if (ready) lead.stage = 'заявка готова';
   // Цену считает код. Если модель записала в карточку свою сумму и она вдвое
@@ -369,7 +371,8 @@ export async function runFollowUps() {
       const byManager = conv.ai_enabled !== 1 || conv.needs_human === 1;
 
       // 1. Подтверждение заказа: накануне вечером и утром в день уборки
-      if (cfg.confirmOn && /^\d{4}-\d{2}-\d{2}$/.test(lead.date_iso || '')) {
+      // напоминаем о визите только по заказам, которые менеджер подтвердил
+      if (cfg.confirmOn && lead.stage === 'дата согласована' && /^\d{4}-\d{2}-\d{2}$/.test(lead.date_iso || '')) {
         const done = String(conv.confirm_sent || '');
         const when = lead.date_iso === addDays(today, 1) && nowHour >= eve && !done.includes('eve') ? 'eve'
           : lead.date_iso === today && nowHour >= morning && !done.includes('morning') ? 'morning' : '';

@@ -174,7 +174,7 @@ const DEFAULT_FACTS = [
   'Отдельно, по видео: полировка пола (мрамор, плитка, паркет), мойка окон на высоте.',
   'Ориентир: квартиры после ремонта — от 25 ₪/м², офисы и коммерческие — от 20 ₪/м². Минимальный заказ — 400 ₪.',
   'Точную цену называет менеджер после видео объекта.',
-  'Работаем по Тель-Авиву и центру, выезд бесплатный.',
+  'Работаем по всей стране, выезд обсуждается с менеджером.',
   'Свои средства и оборудование. Оплата после приёмки работы.'
 ].join('\n');
 seed.run('business_facts', DEFAULT_FACTS);
@@ -237,7 +237,7 @@ seed.run('quick_replies', DEFAULT_QUICK);
 const LEGACY = {
   system_prompt: ['26de0a12bb145470'],
   greeting: ['a6e77eadcb2e6ac0'],
-  business_facts: ['9fa01d5721b12cc7'],
+  business_facts: ['9fa01d5721b12cc7', '9f58cbaa33cc3f94'],
   quick_replies: ['e6d3dbf999f0655b']
 };
 const FRESH = { system_prompt: DEFAULT_PROMPT, greeting: DEFAULT_GREETING, business_facts: DEFAULT_FACTS, quick_replies: DEFAULT_QUICK };

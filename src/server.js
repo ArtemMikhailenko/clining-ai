@@ -9,6 +9,7 @@ import { withinWorkHours, scheduleSetting, workHours, holidays, isHoliday } from
 import { quote, priceList } from './pricing.js';
 import { waStatus, onStatus, requestPairing, logout as waLogout, restart as waRestart } from './channels/baileys.js';
 import { sttLabel } from './stt.js';
+import { notifyManagers } from './notify.js';
 import { aiConfigured, aiLabel } from './ai.js';
 
 const app = express();
@@ -431,6 +432,32 @@ const onlyBaileys = (fn) => async (req, res) => {
 app.post('/api/wa/pair', onlyBaileys(async (req) => ({ code: await requestPairing(req.body?.phone) })));
 app.post('/api/wa/logout', onlyBaileys(() => waLogout()));
 app.post('/api/wa/restart', onlyBaileys(() => waRestart()));
+
+/* Сторож связи. Клиент не должен узнавать о том, что бот отключился, раньше нас:
+   сообщения в это время копятся на стороне WhatsApp и приходят пачкой через часы. */
+let offlineSince = null, warnedAt = 0, restartedAt = 0;
+setInterval(() => {
+  if (channel.name !== 'baileys') return;
+  const st = waStatus();
+  if (st.state === 'online') {
+    if (offlineSince) console.log('WhatsApp снова в сети');
+    offlineSince = null; warnedAt = 0; restartedAt = 0;
+    return;
+  }
+  offlineSince ??= Date.now();
+  const mins = Math.round((Date.now() - offlineSince) / 6e4);
+  if (mins >= 10 && Date.now() - warnedAt > 36e5) {
+    warnedAt = Date.now();
+    notifyManagers(`⚠️ WhatsApp не в сети ${mins} мин (${st.state}). Бот не отвечает клиентам.`
+      + (st.qr ? ' Нужна новая привязка номера.' : '')).catch(() => {});
+  }
+  // разлогин чинится только новым QR, перезапуск тут не поможет
+  if (mins >= 15 && !st.qr && st.state !== 'logged_out' && Date.now() - restartedAt > 18e5) {
+    restartedAt = Date.now();
+    console.log('WhatsApp: перезапускаем подключение');
+    waRestart().catch((e) => console.error('перезапуск подключения:', e.message));
+  }
+}, 6e4).unref?.();
 
 app.listen(PORT, async () => {
   console.log(`\n  Админка:    http://localhost:${PORT}`);
