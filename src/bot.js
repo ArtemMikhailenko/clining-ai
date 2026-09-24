@@ -13,6 +13,7 @@ import { isStopRequest, cadence, missingFor, touchGoal, jitterMinutes, confirmHo
 import { notifyManagers, adminLink } from './notify.js';
 import { aiProvider } from './ai.js';
 import { dominantLang } from './lang.js';
+import { labelFor } from './sources.js';
 
 const listeners = new Set();
 
@@ -128,8 +129,13 @@ export async function handleIncoming({ phone, name, text, wa_id, chat_id = null,
     return;
   }
   const conv = getOrCreateConversation(ch.name, phone, name, chat_id);
-  // откуда клиент: карточка объявления от WhatsApp или метка #… в тексте ссылки
-  setSource(conv.id, ref || tagSource(text));
+  // откуда клиент: карточка объявления от WhatsApp или метка #… в тексте ссылки.
+  // Если в справочнике кампаний нашёлся ключ — пишем название кампании, а не «Реклама Facebook»
+  const src = ref || tagSource(text);
+  if (src) {
+    const named = labelFor(src, text);
+    setSource(conv.id, named ? { ...src, source: named } : src);
+  }
 
   // Голосовые: расшифровываем в текст, дальше бот работает с ним как с обычным
   // сообщением. Сам файл остаётся в диалоге — менеджер может послушать.

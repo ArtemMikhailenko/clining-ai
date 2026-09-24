@@ -73,7 +73,13 @@ function refOf(msg) {
     source: ad ? `Реклама ${label}`.trim() : label,
     title: ad?.title || ad?.body || '',
     url,
-    ref: ad?.ctwaClid || ad?.sourceId || ''
+    ref: ad?.ctwaClid || ad?.sourceId || '',
+    // сырые поля — чтобы было по чему настроить справочник кампаний
+    raw: {
+      title: ad?.title || '', body: ad?.body || '', sourceUrl: url,
+      sourceId: ad?.sourceId || '', sourceType: ad?.sourceType || '', sourceApp: app,
+      ctwaClid: ad?.ctwaClid || '', entry, at: new Date().toISOString()
+    }
   };
 }
 

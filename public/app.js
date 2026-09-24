@@ -1009,6 +1009,8 @@ const SET_SECTIONS = [
     i:'<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>' },
   { k:'access', t:'Доступ', d:'чёрный список, уведомления',
     i:'<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/>' },
+  { k:'ads', t:'Реклама', d:'кампании и метки',
+    i:'<path d="M3 11v2a1 1 0 0 0 1 1h3l5 4V6L7 10H4a1 1 0 0 0-1 1z"/><path d="M16 9a4 4 0 0 1 0 6"/><path d="M19 6a8 8 0 0 1 0 12"/>' },
   { k:'data', t:'Данные', d:'сброс перед рекламой',
     i:'<ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>' },
   { k:'conn', t:'Подключения', d:'WhatsApp, модель, QR',
@@ -1135,6 +1137,13 @@ function renderSettings() {
         + srow('Адрес админки', 'Для ссылки на диалог в уведомлении. На Render подставляется сам.',
           `<input type="text" id="f-adminurl" value="${esc(s.admin_url || '')}" placeholder="https://clining-ai.onrender.com">`))
     },
+    ads: {
+      lead: 'Клик по рекламе в Facebook или Instagram приносит вместе с первым сообщением карточку объявления: заголовок, ссылку и id клика. Название кампании из рекламного кабинета WhatsApp не передаёт — его задаёт справочник ниже.',
+      body: grp('Справочник кампаний', 'По строке на кампанию: <code>ключ = Название</code>. Ключ ищется в заголовке объявления, в ссылке, в id клика, в метке и в первом сообщении клиента — подойдёт любой кусок текста, который есть только у этого объявления. Совпало — в заявке будет название кампании. Первая подходящая строка выигрывает.',
+          swide(`<textarea id="f-sourcemap" class="mono" rows="7" placeholder="ашдод после ремонта = Ашдод · после ремонта&#10;#ig1 = Instagram · сторис&#10;utm_campaign=win = Окна, сентябрь">${esc(s.source_map || '')}</textarea>`))
+        + grp('Что реально приходило', 'Последние объявления и метки, с которых писали клиенты. Отсюда удобно взять ключ для справочника.',
+          swide('<div id="f-srclist" class="srclist">загружаем…</div>'))
+    },
     data: {
       lead: 'Перед запуском рекламы переписку лучше стереть: тестовые диалоги портят воронку, средний чек и отчёты. Настройки, прайс, расписание и привязка WhatsApp останутся на месте.',
       body: grp('Сброс переписки', 'Удаляются все диалоги, сообщения, заявки и присланные файлы. Отменить нельзя, копии не остаётся.',
@@ -1193,6 +1202,18 @@ function renderSettings() {
     $('#f-notify').textContent = p === 'granted' ? 'Уведомления включены' : 'Браузер отказал';
   });
   $('#f-qr') && ($('#f-qr').onclick = () => showQr(waState));
+  if ($('#f-srclist')) {
+    api('/api/sources').then((rows) => {
+      const box = $('#f-srclist');
+      if (!box) return;
+      box.innerHTML = rows.length ? rows.map((r) => {
+        const keys = [r.source_title, r.raw?.sourceId, r.source_ref, r.source_url].filter(Boolean);
+        return `<div class="srcrow"><div><b dir="auto">${esc(r.source)}</b>
+          ${keys.length ? `<small dir="auto">${esc(keys.join(' · '))}</small>` : ''}</div>
+          <span class="n">${r.n}</span></div>`;
+      }).join('') : '<div class="empty" style="padding:18px 0">пока никто не писал с рекламы</div>';
+    }).catch(() => {});
+  }
   $('#f-wipe') && ($('#f-wipe').onclick = async () => {
     const n = (await api('/api/conversations')).length;
     if (!confirm(`Стереть ${n} ${plural(n, 'диалог', 'диалога', 'диалогов')} со всей перепиской и файлами?\n\nНастройки, прайс и подключение WhatsApp останутся.`)) return;
@@ -1281,7 +1302,7 @@ async function saveSettings() {
   if ($('#f-confirmon')) body.confirm_on = $('#f-confirmon').checked;
   put('#f-nudgestale', 'nudge_stale_hours'); put('#f-nudgeh', 'nudge_hours'); put('#f-nudgerep', 'nudge_repeat_hours'); put('#f-nudgemax', 'nudge_max');
   if ($('#f-nudgeon')) body.nudge_on = $('#f-nudgeon').checked;
-  put('#f-managers', 'manager_numbers'); put('#f-adminurl', 'admin_url');
+  put('#f-managers', 'manager_numbers'); put('#f-adminurl', 'admin_url'); put('#f-sourcemap', 'source_map');
   if ($('#f-notifyon')) body.notify_on = $('#f-notifyon').checked;
   put('#f-prompt', 'system_prompt'); put('#f-blocked', 'blocked_numbers'); put('#f-quick', 'quick_replies');
   put('#f-delay', 'reply_delay', (v) => Number(v) * 1000);

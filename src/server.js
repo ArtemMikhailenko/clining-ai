@@ -82,6 +82,7 @@ app.get('/api/state', (req, res) => {
     manager_numbers: getSetting('manager_numbers'),
     notify_on: getSetting('notify_on') === '1',
     admin_url: getSetting('admin_url') || process.env.RENDER_EXTERNAL_URL || '',
+    source_map: getSetting('source_map') || '',
     stt_label: sttLabel(),
     nudge_on: getSetting('nudge_on') === '1',
     nudge_hours: getSetting('nudge_hours'),
@@ -120,6 +121,7 @@ app.post('/api/state', (req, res) => {
   if ('manager_numbers' in req.body) setSetting('manager_numbers', String(req.body.manager_numbers));
   if ('notify_on' in req.body) setSetting('notify_on', req.body.notify_on ? '1' : '0');
   if ('admin_url' in req.body) setSetting('admin_url', String(req.body.admin_url).trim());
+  if ('source_map' in req.body) setSetting('source_map', String(req.body.source_map));
   if ('nudge_on' in req.body) setSetting('nudge_on', req.body.nudge_on ? '1' : '0');
   if ('confirm_on' in req.body) setSetting('confirm_on', req.body.confirm_on ? '1' : '0');
   for (const k of ['nudge_steps_ask', 'nudge_steps_quoted', 'stop_words']) {
@@ -339,6 +341,20 @@ app.post('/api/conversations/:id/note', (req, res) => {
   db.prepare('UPDATE conversations SET note=? WHERE id=?').run(String(req.body.note ?? ''), Number(req.params.id));
   emit('conversations', null);
   res.json({ ok: true });
+});
+
+/**
+ * Что реально приходило с рекламы: по этому списку настраивается справочник
+ * кампаний. Без него пришлось бы угадывать, как Meta называет объявление.
+ */
+app.get('/api/sources', (req, res) => {
+  const rows = db.prepare(`
+    SELECT source, source_title, source_url, source_ref, source_raw,
+           count(*) n, max(created_at) last_at
+    FROM conversations WHERE source IS NOT NULL
+    GROUP BY source, source_title
+    ORDER BY n DESC, last_at DESC LIMIT 40`).all();
+  res.json(rows.map((r) => ({ ...r, raw: r.source_raw ? JSON.parse(r.source_raw) : null })));
 });
 
 /** Заказы с назначенной датой — для календаря. */

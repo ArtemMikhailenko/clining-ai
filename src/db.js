@@ -78,6 +78,8 @@ if (!cols.includes('source')) db.exec('ALTER TABLE conversations ADD COLUMN sour
 if (!cols.includes('source_title')) db.exec('ALTER TABLE conversations ADD COLUMN source_title TEXT');
 if (!cols.includes('source_url')) db.exec('ALTER TABLE conversations ADD COLUMN source_url TEXT');
 if (!cols.includes('source_ref')) db.exec('ALTER TABLE conversations ADD COLUMN source_ref TEXT');
+// весь ответ рекламной площадки целиком: по нему видно, что вообще прислала Meta
+if (!cols.includes('source_raw')) db.exec('ALTER TABLE conversations ADD COLUMN source_raw TEXT');
 // Деньги в трёх состояниях. Оценка бота живёт в карточке (lead.price_quote) и
 // точной не является; согласованную сумму и оплату проставляет человек —
 // иначе в отчёте «средний чек» считается по цифрам, которые никто не подтверждал.
@@ -199,7 +201,9 @@ seed.run('blocked_numbers', '');
 // Кому слать уведомления о передаче заявки. Пусто — не слать.
 seed.run('manager_numbers', '');
 seed.run('notify_on', '1');
-seed.run('admin_url', '');   // для ссылки на диалог; на Render берётся из RENDER_EXTERNAL_URL
+seed.run('admin_url', '');
+// справочник кампаний: «ключ = Название». Ключ ищется в объявлении и первом сообщении
+seed.run('source_map', '');   // для ссылки на диалог; на Render берётся из RENDER_EXTERNAL_URL
 // Дожим: если клиент замолчал после цены, бот сам напомнит о себе. Только в рабочие часы.
 seed.run('nudge_on', '1');
 seed.run('nudge_hours', '20');          // через сколько часов тишины первое напоминание
@@ -312,8 +316,9 @@ export function setSource(convId, src) {
   if (!src?.source) return;
   const cur = db.prepare('SELECT source FROM conversations WHERE id=?').get(convId);
   if (cur?.source) return;
-  db.prepare('UPDATE conversations SET source=?, source_title=?, source_url=?, source_ref=? WHERE id=?')
-    .run(src.source, src.title || null, src.url || null, src.ref || null, convId);
+  db.prepare('UPDATE conversations SET source=?, source_title=?, source_url=?, source_ref=?, source_raw=? WHERE id=?')
+    .run(src.source, src.title || null, src.url || null, src.ref || null,
+      src.raw ? JSON.stringify(src.raw) : null, convId);
 }
 
 /**
