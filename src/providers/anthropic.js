@@ -1,14 +1,25 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { zodOutputFormat } from '@anthropic-ai/sdk/helpers/zod';
 
+import { getSetting } from '../db.js';
+
 const MODEL = process.env.AI_MODEL || 'claude-haiku-4-5';
-const EFFORT = process.env.AI_EFFORT || 'low';
+const LEVELS = ['low', 'medium', 'high'];
+/**
+ * Сколько модель думает над ответом. Живёт в настройках, а не только в .env:
+ * поднять глубину нужно тогда, когда бот путается в живой переписке, и ждать
+ * ради этого передеплоя — значит оставить клиентов с тем же ботом ещё на день.
+ */
+const effort = () => {
+  const v = String(getSetting('ai_effort') || process.env.AI_EFFORT || 'low').toLowerCase();
+  return LEVELS.includes(v) ? v : 'low';
+};
 // output_config.effort не поддерживается на Haiku 4.5 — запрос упадёт с 400
 const supportsEffort = !MODEL.startsWith('claude-haiku');
 
 let client = null;
 export const configured = () => Boolean(process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN);
-export const label = () => `Anthropic · ${MODEL}`;
+export const label = () => `Anthropic · ${MODEL} · ${effort()}`;
 
 const toMessage = (t) => ({
   role: t.role,
@@ -35,7 +46,7 @@ export async function complete({ system, context = '', turns, schema }) {
     ],
     messages: turns.map(toMessage),
     output_config: {
-      ...(supportsEffort ? { effort: EFFORT } : {}),
+      ...(supportsEffort ? { effort: effort() } : {}),
       format: zodOutputFormat(schema)
     }
   });

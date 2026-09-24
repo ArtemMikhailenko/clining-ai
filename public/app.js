@@ -1222,6 +1222,10 @@ function renderSettings() {
           <div class="ctile"><span>Голосовые</span><b>${esc(s.stt_label || 'не настроено')}</b></div></div>`
         + srow('Привязка WhatsApp', 'QR-код или код по номеру телефона, отвязка и переподключение.',
           '<button class="btn primary" id="f-qr">Управлять подключением</button>'))
+      + grp('Глубина обдумывания', 'Сколько модель думает над каждым ответом. Выше — реже теряет нить в длинной переписке, но отвечает медленнее и дороже. Применяется сразу, перезапуск не нужен.',
+        srow('Уровень', 'Обычному диалогу хватает среднего. Высокий имеет смысл, когда бот путается в условиях или повторяется.',
+          `<select id="f-effort">${[['low', 'Низкая - быстро и дёшево'], ['medium', 'Средняя - по умолчанию'], ['high', 'Высокая - думает дольше']]
+            .map(([v, t]) => `<option value="${v}" ${(s.ai_effort || 'low') === v ? 'selected' : ''}>${t}</option>`).join('')}</select>`))
     }
   }[setSection];
 
@@ -1365,6 +1369,7 @@ async function saveSettings() {
   put('#f-nudgestale', 'nudge_stale_hours'); put('#f-nudgeh', 'nudge_hours'); put('#f-nudgerep', 'nudge_repeat_hours'); put('#f-nudgemax', 'nudge_max');
   if ($('#f-nudgeon')) body.nudge_on = $('#f-nudgeon').checked;
   put('#f-managers', 'manager_numbers'); put('#f-adminurl', 'admin_url'); put('#f-sourcemap', 'source_map');
+  put('#f-effort', 'ai_effort');
   if ($('#f-notifyon')) body.notify_on = $('#f-notifyon').checked;
   put('#f-prompt', 'system_prompt'); put('#f-blocked', 'blocked_numbers'); put('#f-quick', 'quick_replies');
   put('#f-delay', 'reply_delay', (v) => Number(v) * 1000);

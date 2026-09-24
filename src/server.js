@@ -83,6 +83,7 @@ app.get('/api/state', (req, res) => {
     notify_on: getSetting('notify_on') === '1',
     admin_url: getSetting('admin_url') || process.env.RENDER_EXTERNAL_URL || '',
     source_map: getSetting('source_map') || '',
+    ai_effort: getSetting('ai_effort') || process.env.AI_EFFORT || 'low',
     stt_label: sttLabel(),
     nudge_on: getSetting('nudge_on') === '1',
     nudge_hours: getSetting('nudge_hours'),
@@ -122,6 +123,11 @@ app.post('/api/state', (req, res) => {
   if ('notify_on' in req.body) setSetting('notify_on', req.body.notify_on ? '1' : '0');
   if ('admin_url' in req.body) setSetting('admin_url', String(req.body.admin_url).trim());
   if ('source_map' in req.body) setSetting('source_map', String(req.body.source_map));
+  if ('ai_effort' in req.body) {
+    const v = String(req.body.ai_effort).toLowerCase();
+    if (!['low', 'medium', 'high'].includes(v)) return res.status(400).json({ error: 'Глубина: low, medium или high' });
+    setSetting('ai_effort', v);
+  }
   if ('nudge_on' in req.body) setSetting('nudge_on', req.body.nudge_on ? '1' : '0');
   if ('confirm_on' in req.body) setSetting('confirm_on', req.body.confirm_on ? '1' : '0');
   for (const k of ['nudge_steps_ask', 'nudge_steps_quoted', 'stop_words']) {
