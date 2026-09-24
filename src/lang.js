@@ -21,10 +21,15 @@ export function detectLang(text = '') {
 export function dominantLang(messages = []) {
   const score = {};
   const last = messages.filter((m) => m.direction === 'in' && m.body).slice(-5);
-  for (const m of last) {
+  for (const [i, m] of last.entries()) {
     const voice = String(m.media || '').includes('"audio"');
-    const l = detectLang(m.body);
-    score[l] = (score[l] ?? 0) + (voice ? 1 : 2);
+    const text = String(m.body).trim();
+    // Чем свежее сообщение, тем больше вес: клиент начал на иврите и перешёл на
+    // русский — отвечать надо по-русски. Но короткое «ок» не должно перевешивать
+    // весь диалог, поэтому вес ещё и от длины сообщения.
+    const weight = 2 ** i * (voice ? 1 : 2) * Math.min(1, text.length / 12);
+    const l = detectLang(text);
+    score[l] = (score[l] ?? 0) + weight;
   }
   // Пусто — значит это первое сообщение в диалоге. Возвращаем пустую строку:
   // подсказка «английский» заставляла Whisper переводить иврит вместо расшифровки.
