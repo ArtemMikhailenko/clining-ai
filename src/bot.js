@@ -69,6 +69,20 @@ function saneArea(lead) {
   return !n || (n >= AREA_MIN && n <= AREA_MAX);
 }
 
+/**
+ * Сбой ИИ человеческим языком. В уведомление менеджеру и в админку уходил
+ * необработанный текст ошибки: однажды это был JSON со стеком на пол-экрана,
+ * из которого не понять ни клиента, ни что делать. Подробности — в лог сервера.
+ */
+function aiErrorText(e) {
+  const m = String(e?.message ?? '');
+  if (/structured output|не по схеме|schema|parse/i.test(m)) return 'ИИ ответил не по формату — ответьте сами';
+  if (/429|rate.?limit|overloaded/i.test(m)) return 'ИИ перегружен — ответьте сами';
+  if (/401|403|api.?key|credit|billing/i.test(m)) return 'проблема с ключом или оплатой ИИ';
+  if (/timeout|ETIMEDOUT|ECONNRESET|fetch failed|network/i.test(m)) return 'ИИ не ответил вовремя';
+  return 'сбой ИИ: ' + m.split('\n')[0].slice(0, 120);
+}
+
 /** Что увидели на видео — сразу в карточку заявки, чтобы менеджер не пересматривал. */
 function applyReport(convId, report) {
   const conv = getConversation(convId);
@@ -236,9 +250,23 @@ async function respond(convId, ch, text) {
       offHoursNote: scheduleSetting('off_hours_note') || 'Менеджер подтвердит заказ в рабочие часы.'
     });
   } catch (e) {
-    lastAiError = { message: e.message, at: new Date().toISOString() };
-    flagHuman(conv.id, 'сбой ИИ: ' + e.message);
-    addMessage(conv.id, { direction: 'out', author: 'system', body: 'ИИ не смог ответить: ' + e.message, error: '1' });
+    console.error('ИИ не ответил:', e.message);
+    const short = aiErrorText(e);
+    lastAiError = { message: short, at: new Date().toISOString() };
+    flagHuman(conv.id, short);
+    addMessage(conv.id, { direction: 'out', author: 'system', body: 'ИИ не смог ответить: ' + short, error: '1' });
+    // Клиент написал впервые и не получил ничего — тишина хуже короткой фразы.
+    // Одно сообщение на диалог: дальше отвечает менеджер, которому уже ушло уведомление.
+    const silent = !db.prepare("SELECT 1 FROM messages WHERE conv_id=? AND direction='out' AND author IN ('ai','human') LIMIT 1").get(conv.id);
+    if (silent) {
+      const hello = [pickGreeting(text), 'Секунду, подключаю менеджера.'].filter(Boolean).join('\n');
+      try {
+        const wa = (await adapterFor(fresh).send(fresh, hello)).wa_id;
+        addMessage(conv.id, { direction: 'out', author: 'ai', body: hello, wa_id: wa });
+      } catch (sendErr) {
+        console.error('не отправилось приветствие после сбоя ИИ:', sendErr.message);
+      }
+    }
     emit('conversations', null);
     emit('message', { conv_id: conv.id });
     return;

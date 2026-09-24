@@ -3,6 +3,7 @@ import { getSetting } from './db.js';
 import { asImages } from './media.js';
 import { dominantLang, LANG_NAME } from './lang.js';
 import { quoteHint } from './pricing.js';
+import { normalizeLead, SERVICES, CONDITIONS, STAGES } from './leadnorm.js';
 import { scheduleSetting, scheduleText, workHours, isHoliday } from './schedule.js';
 import * as anthropic from './providers/anthropic.js';
 import * as openai from './providers/openai.js';
@@ -17,7 +18,9 @@ export const aiLabel = () => (provider.configured() ? provider.label() : 'заг
 // Пустая строка = «клиент этого не называл». Так проще, чем optional в strict-схеме.
 const Lead = z.object({
   name: z.string(),
-  service: z.enum(['', 'после ремонта', 'перед въездом', 'после выезда', 'генеральная', 'поддерживающая']),
+  // Значения этих полей проверяет код (leadnorm.js), а не схема: синоним или
+  // слово на иврите не должны ронять весь ответ — клиент останется без реплики
+  service: z.string(),            // после ремонта / перед въездом / после выезда / генеральная / поддерживающая
   object_type: z.string(),        // квартира / дом / офис / коммерческое помещение
   area_m2: z.string(),
   rooms_count: z.string(),        // сколько комнат
@@ -28,11 +31,11 @@ const Lead = z.object({
   date: z.string(),               // как сказал клиент: «в субботу», «завтра»
   date_iso: z.string(),           // та же дата в виде ГГГГ-ММ-ДД, посчитанная от сегодняшней
   time: z.string(),               // ЧЧ:ММ, если названо время
-  windows: z.enum(['', 'да', 'нет']),
-  condition: z.enum(['', 'лёгкое', 'среднее', 'сильное', 'после ремонта']),
+  windows: z.string(),            // да / нет
+  condition: z.string(),          // лёгкое / среднее / сильное / после ремонта
   price_quote: z.string(),        // что назвали клиенту
-  stage: z.enum(['', 'новый', 'уточняем', 'ждём видео', 'заявка готова', 'назвали цену',
-    'готов к заказу', 'дата согласована', 'отказ'])
+  stage: z.string()               // новый / уточняем / ждём видео / заявка готова / назвали цену
+                                  // / готов к заказу / дата согласована / отказ
 });
 
 const Answer = z.object({
@@ -282,7 +285,20 @@ export async function generateReply(conv, messages, opts = {}) {
       : 'Видео и фото клиент пока не присылал.'
   ].filter(Boolean).join('\n');
 
-  const { out, usage } = await provider.complete({ system, context, turns, schema: Answer });
+  // Одна неудача — не повод бросать клиента: пробуем ещё раз, напомнив про формат.
+  // Модель иногда отвечает не по схеме, особенно на длинной переписке.
+  let out, usage;
+  try {
+    ({ out, usage } = await provider.complete({ system, context, turns, schema: Answer }));
+  } catch (e) {
+    console.error('ИИ, первая попытка:', e.message);
+    const retryNote = context + '\nПредыдущий ответ не прошёл проверку формата.'
+      + ` Поля заполняй строго значениями из списков: service — ${SERVICES.join(' / ')};`
+      + ` condition — ${CONDITIONS.join(' / ')}; stage — ${STAGES.join(' / ')}; windows — да / нет.`
+      + ' Если значение не подходит ни под одно — оставь поле пустым.';
+    ({ out, usage } = await provider.complete({ system, context: retryNote, turns, schema: Answer }));
+  }
+  out.lead = normalizeLead(out.lead || {});
   if (process.env.AI_LOG_COST) {
     console.log(`[ai] ${provider.label()} in=${usage.in} cached=${usage.cached} write=${usage.created ?? 0} out=${usage.out}`);
   }
