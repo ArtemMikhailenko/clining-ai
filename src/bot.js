@@ -228,6 +228,15 @@ async function respond(convId, ch, text) {
   // за время паузы менеджер мог перехватить диалог
   if (getSetting('ai_global') !== '1' || fresh.ai_enabled !== 1) return;
 
+  // Клиенту уже ответили на всё, что он написал. Так бывает, когда сообщение
+  // пришло, пока бот отвечал на предыдущее: очередь запускала второй ответ,
+  // и модель, не увидев ничего нового, переспрашивала то же самое.
+  const lastOut = db.prepare(`SELECT id FROM messages WHERE conv_id=? AND direction='out'
+    AND author IN ('ai','human') ORDER BY id DESC LIMIT 1`).get(convId)?.id ?? 0;
+  const hasNew = db.prepare("SELECT 1 FROM messages WHERE conv_id=? AND direction='in' AND id > ?")
+    .get(convId, lastOut);
+  if (!hasNew) return;
+
   const conv = fresh;
 
   // ночью и в выходные живого менеджера нет: либо бот предупреждает об этом,
@@ -312,7 +321,7 @@ async function respond(convId, ch, text) {
   if (out.needs_human) flagHuman(conv.id, out.handoff_reason || 'ИИ передал диалог');
   else if (ready) flagHuman(conv.id, 'заявка готова — посмотреть видео и назвать цену');
 
-  const replies = [...(out.replies ?? [])];
+  let replies = [...(out.replies ?? [])];
 
   // Суммы в тексте тоже проверяем: модель напечатала «21252500 ₪» вместо 21 250 ₪,
   // и клиент получил счёт на два миллиона. Ставки «25 ₪/м²» не трогаем.
@@ -334,6 +343,18 @@ async function respond(convId, ch, text) {
     emit('message', { conv_id: conv.id });
     return;
   }
+
+  // Страховка от повторов: модель иногда переспрашивает то же самое другими
+  // словами. Сравниваем с тем, что бот писал недавно, по «скелету» текста.
+  const skeleton = (t) => String(t).toLowerCase().replace(/ё/g, 'е').replace(/[^\p{L}\p{N}]/gu, '');
+  const said = db.prepare(`SELECT body FROM messages WHERE conv_id=? AND direction='out'
+    AND author='ai' ORDER BY id DESC LIMIT 3`).all(conv.id).map((m) => skeleton(m.body)).filter((x) => x.length > 12);
+  replies = replies.filter((r) => {
+    const k = skeleton(r);
+    if (k.length < 12) return true;
+    return !said.some((old) => old.includes(k) || k.includes(old));
+  });
+  if (!replies.length) return;
 
   // первый наш ответ в диалоге предваряем приветствием с раскрытием ИИ:
   // это требование правил WhatsApp, его нельзя оставлять на усмотрение модели
