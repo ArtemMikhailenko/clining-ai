@@ -816,7 +816,8 @@ const LABELS = { service:'Тип уборки', object_type:'Объект', area
   windows:'Мыть окна', condition:'Загрязнение', price_quote:'Оценка бота', stage:'Стадия' };
 
 // поля диалога, а не карточки: запись подтверждает человек, источник приходит с рекламы
-const CONV_KEYS = new Set(['job_date', 'job_time', 'source', 'deal_sum', 'paid_sum', 'paid_at']);
+const CONV_KEYS = new Set(['job_date', 'job_time', 'source', 'deal_sum', 'paid_sum', 'paid_at',
+  'followup_at', 'followup_note']);
 
 // что можно править руками и чем: ИИ ошибается, а по телефону он не слышит
 const EDITABLE = [
@@ -834,6 +835,8 @@ const EDITABLE = [
   ['job_date', 'Записан на', 'date'],
   ['job_time', 'Время записи', 'text'],
   ['source', 'Источник', 'text'],
+  ['followup_at', 'Напомнить о себе', 'date'],
+  ['followup_note', 'О чём напомнить', 'text'],
   ['windows', 'Мыть окна', 'select', ['', 'да', 'нет']],
   ['condition', 'Загрязнение', 'select', ['', 'лёгкое', 'среднее', 'сильное', 'после ремонта']],
   ['price_quote', 'Оценка бота, ₪', 'text'],

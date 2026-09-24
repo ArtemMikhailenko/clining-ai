@@ -315,6 +315,17 @@ app.post('/api/conversations/:id/lead', (req, res) => {
     if (d && !/^\d{4}-\d{2}-\d{2}$/.test(d)) return res.status(400).json({ error: 'Дата оплаты — ГГГГ-ММ-ДД' });
     db.prepare('UPDATE conversations SET paid_at=? WHERE id=?').run(d || null, id);
   }
+  // Напоминание можно поправить руками: клиент позвонил и перенёс сроки,
+  // а бот об этом не знает — в переписке этого не было.
+  if ('followup_at' in req.body || 'followup_note' in req.body) {
+    const at = String(req.body.followup_at ?? conv.followup_at ?? '').trim();
+    if (at && !/^\d{4}-\d{2}-\d{2}$/.test(at)) {
+      return res.status(400).json({ error: 'Дата напоминания — ГГГГ-ММ-ДД' });
+    }
+    const note = String(req.body.followup_note ?? conv.followup_note ?? '').trim();
+    db.prepare('UPDATE conversations SET followup_at=?, followup_note=?, nudges=0 WHERE id=?')
+      .run(at || null, at ? (note || null) : null, id);
+  }
   if ('source' in req.body) {
     db.prepare('UPDATE conversations SET source=? WHERE id=?').run(String(req.body.source ?? '').trim() || null, id);
   }
