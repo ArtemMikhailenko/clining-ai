@@ -165,10 +165,17 @@ app.get('/api/stats', (req, res) => {
     return [...m.entries()].sort((a, b) => b[1] - a[1]);
   };
 
-  // средний названный чек: из строк вида «от 2250 ₪» берём число
-  const money = leads.map((c) => Number(String(c.l.price_quote || '').replace(/[^\d]/g, '')))
+  // Деньги в трёх состояниях: что бот прикинул, о чём договорились, что получили.
+  // Средний чек считаем по согласованным суммам — оценка бота это ещё не выручка.
+  const totals = (nums) => ({ sum: nums.reduce((a, b) => a + b, 0), n: nums.length });
+  const nums = (rows, pick) => rows.map(pick).map((v) => Number(String(v ?? '').replace(/[^\d]/g, '')))
     .filter((n) => n > 0);
-  const avgCheck = money.length ? Math.round(money.reduce((a, b) => a + b, 0) / money.length) : 0;
+  const money = {
+    quoted: totals(nums(leads, (c) => c.l.price_quote)),
+    agreed: totals(nums(leads, (c) => c.deal_sum)),
+    paid: totals(nums(leads, (c) => c.paid_sum))
+  };
+  const avgCheck = money.agreed.n ? Math.round(money.agreed.sum / money.agreed.n) : 0;
 
   // время до первого ответа бота
   const react = db.prepare(`
@@ -206,7 +213,7 @@ app.get('/api/stats', (req, res) => {
     WHERE created_at >= datetime('now', ?) AND created_at < datetime('now', ?)`)
     .all(`-${days * 2} days`, since)
     .map((c) => ({ ...c, l: JSON.parse(c.lead || '{}') }));
-  const prevMoney = prevRows.map((c) => Number(String(c.l.price_quote || '').replace(/[^\d]/g, ''))).filter((n) => n > 0);
+  const prevMoney = nums(prevRows, (c) => c.deal_sum);
 
   // сколько напоминаний ушло и сколько из них вернули клиента в разговор
   const nudgeSent = db.prepare(`
@@ -235,6 +242,7 @@ app.get('/api/stats', (req, res) => {
     closed: count((c) => c.status === 'closed'),
     refused: count((c) => c.l.stage === 'отказ'),
     avg_check: avgCheck,
+    money,
     avg_reply_sec: avgReply,
     photos,
     by_service: group((c) => c.l.service),
@@ -294,6 +302,18 @@ app.post('/api/conversations/:id/lead', (req, res) => {
       .run(jd || null, jt || null, jd || null, id);
     if (jd && lead.stage !== 'отказ') lead.stage = 'дата согласована';
     if (!jd && lead.stage === 'дата согласована') lead.stage = 'готов к заказу';
+  }
+  // Деньги проставляет человек: «согласовано» — то, о чём договорились,
+  // «оплачено» — то, что реально получили. Оценка бота остаётся в карточке отдельно.
+  for (const k of ['deal_sum', 'paid_sum']) {
+    if (!(k in req.body)) continue;
+    const n = Number(String(req.body[k] ?? '').replace(/[^\d]/g, ''));
+    db.prepare(`UPDATE conversations SET ${k}=? WHERE id=?`).run(n > 0 ? n : null, id);
+  }
+  if ('paid_at' in req.body) {
+    const d = String(req.body.paid_at ?? '').trim();
+    if (d && !/^\d{4}-\d{2}-\d{2}$/.test(d)) return res.status(400).json({ error: 'Дата оплаты — ГГГГ-ММ-ДД' });
+    db.prepare('UPDATE conversations SET paid_at=? WHERE id=?').run(d || null, id);
   }
   if ('source' in req.body) {
     db.prepare('UPDATE conversations SET source=? WHERE id=?').run(String(req.body.source ?? '').trim() || null, id);

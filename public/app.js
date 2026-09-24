@@ -198,8 +198,10 @@ function renderHeaderStats() {
   if (!el) return;
   const need = convs.filter((c) => c.needs_human).length;
   const active = convs.filter((c) => c.status !== 'closed').length;
+  // в воронке считаем согласованные суммы, а где их нет — оценку бота:
+  // иначе цифра в шапке живёт своей жизнью и ей перестают верить
   const money = convs.filter((c) => c.status !== 'closed')
-    .reduce((a, c) => a + (Number(String(lead(c).price_quote || '').replace(/[^\d]/g, '')) || 0), 0);
+    .reduce((a, c) => a + (Number(c.deal_sum) || Number(String(lead(c).price_quote || '').replace(/[^\d]/g, '')) || 0), 0);
   el.innerHTML = `
     <span class="hchip ${need ? 'warn' : ''}"><b>${need}</b> ждут ответа</span>
     <span class="hchip"><b>${active}</b> в работе</span>
@@ -209,12 +211,13 @@ function renderHeaderStats() {
 /** Выгрузка заявок для бухгалтерии или переноса в другую систему. */
 function exportCsv() {
   const rows = convs.filter(matches);
-  const head = ['Клиент', 'Телефон', 'Уборка', 'м²', 'Комнат', 'Санузлов', 'Район', 'Хочет', 'Записан', 'Цена', 'Источник', 'Стадия', 'Обновлена'];
+  const head = ['Клиент', 'Телефон', 'Уборка', 'м²', 'Комнат', 'Санузлов', 'Район', 'Хочет', 'Записан', 'Оценка', 'Согласовано', 'Оплачено', 'Источник', 'Стадия', 'Обновлена'];
   const esc2 = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
   const body = rows.map((c) => {
     const l = lead(c);
     return [l.name || c.name || '', '+' + c.phone, l.service, l.area_m2, l.rooms_count, l.bathrooms,
-      l.district, l.date, c.job_date, l.price_quote, c.source, colTitle(columnOf(c)), c.last_at].map(esc2).join(';');
+      l.district, l.date, c.job_date, l.price_quote, c.deal_sum || '', c.paid_sum || '', c.source,
+      colTitle(columnOf(c)), c.last_at].map(esc2).join(';');
   });
   // BOM, иначе Excel не понимает кириллицу в UTF-8
   const blob = new Blob(['\uFEFF' + [head.map(esc2).join(';'), ...body].join('\n')], { type: 'text/csv' });
@@ -351,7 +354,7 @@ function renderDash() {
         `конверсия ${conv}%`, mini(recent.map((d) => d.won)))}
       ${kpi('var(--s4)', 'wallet', 'Средний чек',
         `<div class="v">${s.avg_check ? s.avg_check.toLocaleString('ru-RU') + '<small>₪</small>' : '—'}${delta(s.avg_check, prev.avg_check)}</div>`,
-        'по названным ценам')}
+        s.money?.agreed?.n ? `по ${s.money.agreed.n} ${plural(s.money.agreed.n, 'согласованной', 'согласованным', 'согласованным')} ${plural(s.money.agreed.n, 'сумме', 'суммам', 'суммам')}` : 'согласованных сумм пока нет')}
       ${kpi('var(--accent)', 'bolt', 'Ответ бота',
         `<div class="v">${secs ? (secs < 120 ? secs + '<small>с</small>' : Math.round(secs / 60) + '<small>мин</small>') : '—'}</div>`,
         'медиана, рабочие часы')}
@@ -368,6 +371,9 @@ function renderDash() {
         <div class="panel-foot"><div class="stg">${s.by_stage.map(([n, v]) =>
           `<span><i style="background:${STAGE_COLOR[n] || 'var(--s1)'}"></i>${esc(n)} <b>${v}</b></span>`).join('')}
           <span><i style="background:var(--muted)"></i>закрыто <b>${s.closed}</b></span></div>
+          ${s.money ? `<div class="info"><span>Оценки бота</span><b>${s.money.quoted.sum.toLocaleString('ru-RU')} ₪ · ${s.money.quoted.n}</b></div>
+            <div class="info"><span>Согласовано</span><b>${s.money.agreed.sum.toLocaleString('ru-RU')} ₪ · ${s.money.agreed.n}</b></div>
+            <div class="info"><span>Оплачено</span><b>${s.money.paid.sum.toLocaleString('ru-RU')} ₪ · ${s.money.paid.n}</b></div>` : ''}
           ${s.nudges ? `<div class="info"><span>Напоминания</span><b>${s.nudges.sent} → ${s.nudges.replied} ответили${s.nudges.sent ? ` · ${Math.round(s.nudges.replied / s.nudges.sent * 100)}%` : ''}</b></div>` : ''}</div>
       </div>
     </div>
@@ -807,10 +813,10 @@ async function send(root) {
 /* ───── карточка заявки ───── */
 const LABELS = { service:'Тип уборки', object_type:'Объект', area_m2:'Площадь, м²', rooms_count:'Комнат',
   bathrooms:'Санузлов', district:'Район', address:'Адрес', works:'Что сделать', date:'Хочет убрать',
-  windows:'Мыть окна', condition:'Загрязнение', price_quote:'Названа цена', stage:'Стадия' };
+  windows:'Мыть окна', condition:'Загрязнение', price_quote:'Оценка бота', stage:'Стадия' };
 
 // поля диалога, а не карточки: запись подтверждает человек, источник приходит с рекламы
-const CONV_KEYS = new Set(['job_date', 'job_time', 'source']);
+const CONV_KEYS = new Set(['job_date', 'job_time', 'source', 'deal_sum', 'paid_sum', 'paid_at']);
 
 // что можно править руками и чем: ИИ ошибается, а по телефону он не слышит
 const EDITABLE = [
@@ -830,7 +836,10 @@ const EDITABLE = [
   ['source', 'Источник', 'text'],
   ['windows', 'Мыть окна', 'select', ['', 'да', 'нет']],
   ['condition', 'Загрязнение', 'select', ['', 'лёгкое', 'среднее', 'сильное', 'после ремонта']],
-  ['price_quote', 'Названа цена', 'text'],
+  ['price_quote', 'Оценка бота, ₪', 'text'],
+  ['deal_sum', 'Согласовано, ₪', 'text'],
+  ['paid_sum', 'Оплачено, ₪', 'text'],
+  ['paid_at', 'Дата оплаты', 'date'],
   ['stage', 'Стадия', 'select', ['', 'новый', 'уточняем', 'ждём видео', 'заявка готова', 'назвали цену', 'готов к заказу', 'дата согласована', 'отказ']]
 ];
 
@@ -888,6 +897,11 @@ function leadHtml(c) {
     ${q ? `<div class="sect"><h4>Расчёт по прайсу</h4><div class="calc">
         ${q.lines.map((x) => `<div class="l"><span>${esc(x.label)}</span><span>${x.sum.toLocaleString('ru-RU')}</span></div>`).join('')}
         <div class="tot"><span>Итого</span><span>${q.total.toLocaleString('ru-RU')} ${esc(q.currency)}</span></div>
+      </div></div>` : ''}
+    ${(c.deal_sum || c.paid_sum) ? `<div class="sect"><h4>Деньги</h4><div class="calc">
+        ${lead(c).price_quote ? `<div class="l"><span>оценка бота</span><span>${esc(lead(c).price_quote)}</span></div>` : ''}
+        ${c.deal_sum ? `<div class="l"><span>согласовано</span><span>${c.deal_sum.toLocaleString('ru-RU')} ₪</span></div>` : ''}
+        ${c.paid_sum ? `<div class="tot"><span>оплачено${c.paid_at ? ' · ' + esc(c.paid_at) : ''}</span><span>${c.paid_sum.toLocaleString('ru-RU')} ₪</span></div>` : ''}
       </div></div>` : ''}
     ${thumbs ? `<div class="sect"><h4>Фото от клиента (${photos.length})</h4><div class="thumbs">${thumbs}</div></div>` : ''}
     ${rooms ? `<div class="sect"><h4>Что видно на фото</h4>${rooms}</div>` : ''}
