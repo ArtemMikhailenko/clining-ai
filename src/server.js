@@ -360,6 +360,41 @@ app.get('/api/sources', (req, res) => {
 /** Заказы с назначенной датой — для календаря. */
 app.get('/api/holidays', (req, res) => res.json(holidays()));
 
+const JOB_FIELDS = ['date', 'time', 'name', 'phone', 'service', 'area', 'district', 'price', 'note'];
+
+/** Уборка, заведённая руками: клиент позвонил или пришёл по сарафану. */
+app.post('/api/jobs', (req, res) => {
+  const v = Object.fromEntries(JOB_FIELDS.map((k) => [k, String(req.body?.[k] ?? '').trim() || null]));
+  if (!v.date || !/^\d{4}-\d{2}-\d{2}$/.test(v.date)) {
+    return res.status(400).json({ error: 'Нужна дата в виде ГГГГ-ММ-ДД' });
+  }
+  const { lastInsertRowid } = db.prepare(`INSERT INTO jobs(${JOB_FIELDS.join(',')})
+    VALUES(${JOB_FIELDS.map(() => '?').join(',')})`).run(...JOB_FIELDS.map((k) => v[k]));
+  emit('conversations', null);
+  res.json(db.prepare('SELECT * FROM jobs WHERE id=?').get(lastInsertRowid));
+});
+
+app.post('/api/jobs/:id', (req, res) => {
+  const id = Number(req.params.id);
+  const cur = db.prepare('SELECT * FROM jobs WHERE id=?').get(id);
+  if (!cur) return res.sendStatus(404);
+  const v = Object.fromEntries(JOB_FIELDS.map((k) =>
+    [k, (k in req.body ? String(req.body[k] ?? '').trim() : cur[k]) || null]));
+  if (!v.date || !/^\d{4}-\d{2}-\d{2}$/.test(v.date)) {
+    return res.status(400).json({ error: 'Нужна дата в виде ГГГГ-ММ-ДД' });
+  }
+  db.prepare(`UPDATE jobs SET ${JOB_FIELDS.map((k) => `${k}=?`).join(',')} WHERE id=?`)
+    .run(...JOB_FIELDS.map((k) => v[k]), id);
+  emit('conversations', null);
+  res.json(db.prepare('SELECT * FROM jobs WHERE id=?').get(id));
+});
+
+app.delete('/api/jobs/:id', (req, res) => {
+  db.prepare('DELETE FROM jobs WHERE id=?').run(Number(req.params.id));
+  emit('conversations', null);
+  res.json({ ok: true });
+});
+
 app.get('/api/schedule', (req, res) => {
   // в расписание попадает только подтверждённая запись (job_date), а не
   // пожелание клиента из карточки: «хочу в субботу» — это ещё не заказ
@@ -372,8 +407,30 @@ app.get('/api/schedule', (req, res) => {
       price: c.l.price_quote || '', stage: c.l.stage || '', confirmed: true,
       holiday: Boolean(isHoliday(c.job_date))
     }))
-    .sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time));
-  res.json(rows);
+    .map((r) => ({ ...r, kind: 'conv' }));
+
+  // уборки, заведённые руками — их в переписке нет
+  const manual = db.prepare('SELECT * FROM jobs').all().map((j) => ({
+    id: j.id, kind: 'manual', phone: j.phone || '', name: j.name || '',
+    date: j.date, time: j.time || '', service: j.service || '', area: j.area || '',
+    district: j.district || '', price: j.price || '', note: j.note || '',
+    stage: '', confirmed: true, holiday: Boolean(isHoliday(j.date))
+  }));
+
+  // пожелания клиентов: дата названа боту, но менеджер её ещё не подтвердил.
+  // Показываем в календаре отдельно — чтобы день не выглядел свободным
+  const wishes = db.prepare("SELECT * FROM conversations WHERE status != 'closed' AND (job_date IS NULL OR job_date = '')").all()
+    .map((c) => ({ ...c, l: JSON.parse(c.lead || '{}') }))
+    .filter((c) => /^\d{4}-\d{2}-\d{2}$/.test(c.l.date_iso || '') && c.l.stage !== 'отказ')
+    .map((c) => ({
+      id: c.id, kind: 'wish', phone: c.phone, name: c.l.name || c.name, date: c.l.date_iso,
+      time: c.l.time || '', service: c.l.service || '', area: c.l.area_m2 || '',
+      district: c.l.district || '', price: c.l.price_quote || '', stage: c.l.stage || '',
+      confirmed: false, holiday: Boolean(isHoliday(c.l.date_iso))
+    }));
+
+  res.json([...rows, ...manual, ...wishes]
+    .sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time)));
 });
 
 app.post('/api/conversations/:id/read', (req, res) => {

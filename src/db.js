@@ -41,6 +41,23 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conv_id, id);
 CREATE INDEX IF NOT EXISTS idx_messages_waid ON messages(wa_id);
 
+-- Уборки, заведённые руками: клиент позвонил, пришёл по сарафану, постоянный
+-- заказчик. Без этого в расписание попадает только то, что прошло через бота.
+CREATE TABLE IF NOT EXISTS jobs (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  date       TEXT NOT NULL,                     -- ГГГГ-ММ-ДД
+  time       TEXT,
+  name       TEXT,
+  phone      TEXT,
+  service    TEXT,
+  area       TEXT,
+  district   TEXT,
+  price      TEXT,
+  note       TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_jobs_date ON jobs(date);
+
 CREATE TABLE IF NOT EXISTS settings (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -328,15 +345,16 @@ export function setSource(convId, src) {
 export function resetData() {
   const convs = db.prepare('SELECT count(*) n FROM conversations').get().n;
   const msgs = db.prepare('SELECT count(*) n FROM messages').get().n;
-  db.exec('DELETE FROM messages; DELETE FROM conversations;');
-  try { db.exec("DELETE FROM sqlite_sequence WHERE name IN ('messages','conversations')"); } catch {}
+  const jobs = db.prepare('SELECT count(*) n FROM jobs').get().n;
+  db.exec('DELETE FROM messages; DELETE FROM conversations; DELETE FROM jobs;');
+  try { db.exec("DELETE FROM sqlite_sequence WHERE name IN ('messages','conversations','jobs')"); } catch {}
   let files = 0;
   const mediaDir = path.join(dir, 'media');
-  if (!fs.existsSync(mediaDir)) return { conversations: convs, messages: msgs, files: 0 };
+  if (!fs.existsSync(mediaDir)) return { conversations: convs, messages: msgs, jobs, files: 0 };
   for (const f of fs.readdirSync(mediaDir, { withFileTypes: true }).filter((x) => x.isFile())) {
     try { fs.rmSync(path.join(mediaDir, f.name)); files++; } catch {}
   }
-  return { conversations: convs, messages: msgs, files };
+  return { conversations: convs, messages: msgs, jobs, files };
 }
 
 export const getConversation = (id) =>

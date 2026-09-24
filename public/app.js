@@ -171,7 +171,8 @@ function calTools() {
   return `<div class="seg">
     <button id="cal-prev" title="Предыдущая неделя">${chev('m15 18-6-6 6-6')}</button>
     <button id="cal-today" class="${weekOffset === 0 ? 'on' : ''}">Эта неделя</button>
-    <button id="cal-next" title="Следующая неделя">${chev('m9 18 6-6-6-6')}</button></div>`;
+    <button id="cal-next" title="Следующая неделя">${chev('m9 18 6-6-6-6')}</button></div>
+    <button class="btn primary" id="cal-add">+ Уборка</button>`;
 }
 function dashTools() {
   return `<div class="seg" id="days">${[7, 30, 90]
@@ -191,6 +192,7 @@ function bindTools() {
   $('#cal-prev') && ($('#cal-prev').onclick = () => { weekOffset--; renderCal(); });
   $('#cal-next') && ($('#cal-next').onclick = () => { weekOffset++; renderCal(); });
   $('#cal-today') && ($('#cal-today').onclick = () => { weekOffset = 0; renderCal(); });
+  $('#cal-add') && ($('#cal-add').onclick = () => openJob({ date: iso(new Date()) }));
 }
 
 function renderHeaderStats() {
@@ -436,17 +438,17 @@ async function renderCal() {
 
   const week = jobs.filter((j) => j.date >= iso(days[0]) && j.date <= iso(days[6]));
   const total = week.reduce((a, j) => a + money(j.price), 0);
-  const pending = week.filter((j) => !j.confirmed).length;
+  const pending = week.filter((j) => j.kind === 'wish').length;
   const free = days.filter((d) => Array.isArray(hours[d.getDay()]) && !hol[iso(d)] && iso(d) >= today
     && !jobs.some((j) => j.date === iso(d))).length;
   $('#cal-sum').innerHTML = `
     <div class="cs"><b>${week.length}</b>${plural(week.length, 'уборка', 'уборки', 'уборок')}</div>
     <div class="cs gold"><b>${total ? total.toLocaleString('ru-RU') + ' ₪' : '—'}</b>на неделе</div>
-    <div class="cs ${pending ? 'warn' : ''}"><b>${pending}</b>ждут подтверждения</div>
+    <div class="cs ${pending ? 'warn' : ''}"><b>${pending}</b>${plural(pending, 'пожелание клиента', 'пожелания клиентов', 'пожеланий клиентов')}</div>
     <div class="cs"><b>${free}</b>${plural(free, 'свободный день', 'свободных дня', 'свободных дней')}</div>
     <div class="grow"></div>
-    <div class="cal-legend"><span><i style="background:var(--s3)"></i>подтверждена</span>
-      <span><i style="background:var(--warn)"></i>ждёт подтверждения</span><span><i class="hatch"></i>выходной</span></div>`;
+    <div class="cal-legend"><span><i style="background:var(--s3)"></i>записана</span>
+      <span><i style="background:var(--warn)"></i>хочет, но не записан</span><span><i class="hatch"></i>выходной</span></div>`;
 
   el.innerHTML = days.map((d, di) => {
     const key = iso(d), mine = jobs.filter((j) => j.date === key);
@@ -456,7 +458,7 @@ async function renderCal() {
     const sum = mine.reduce((a, j) => a + money(j.price), 0);
     const when = working ? h.join('–') : isHol ? 'праздник' : 'выходной';
     const cls = [!working && 'off', key === today && 'today', key < today && 'past'].filter(Boolean).join(' ');
-    return `<div class="cday ${cls}" style="animation-delay:${di * 30}ms">
+    return `<div class="cday ${cls}" data-date="${key}" style="animation-delay:${di * 30}ms">
       <div class="cday-h"><span class="cday-num">${d.getDate()}</span>
         <div class="cday-wd"><b>${d.toLocaleDateString('ru-RU', { weekday: 'long' })}</b>
           <span>${esc(when)}</span></div>
@@ -467,7 +469,14 @@ async function renderCal() {
       ${sum ? `<div class="cday-f"><span>итого за день</span><b>${sum.toLocaleString('ru-RU')} ₪</b></div>` : ''}
     </div>`;
   }).join('');
-  $$('.job', el).forEach((j) => j.onclick = () => openConv(Number(j.dataset.id), true));
+  $$('.job', el).forEach((j) => j.onclick = () => (j.dataset.kind === 'manual'
+    ? openJob(jobs.find((x) => x.kind === 'manual' && x.id === Number(j.dataset.id)))
+    : openConv(Number(j.dataset.id), true)));
+  // клик по пустому месту дня — завести уборку на этот день
+  $$('.cday', el).forEach((d) => d.addEventListener('click', (e) => {
+    if (e.target.closest('.job')) return;
+    openJob({ date: d.dataset.date });
+  }));
 
   const upcoming = jobs.filter((j) => j.date >= today).length;
   const badge = $('#nav-cal');
@@ -475,15 +484,68 @@ async function renderCal() {
 }
 
 function jobHtml(j, i) {
-  return `<div class="job ${j.confirmed ? '' : 'unconfirmed'}" data-id="${j.id}" style="animation-delay:${i * 40}ms">
-    <div class="jt">${ico(ICONS.time)}${esc(j.time || 'время не назначено')}
-      ${j.confirmed ? '' : '<span class="st">не подтверждена</span>'}</div>
+  const tag = j.kind === 'wish' ? '<span class="st wish">хочет, не записан</span>'
+    : j.kind === 'manual' ? '<span class="st hand">вручную</span>' : '';
+  return `<div class="job ${j.kind === 'wish' ? 'unconfirmed wish' : ''}" data-id="${j.id}" data-kind="${j.kind}"
+    style="animation-delay:${i * 40}ms">
+    <div class="jt">${ico(ICONS.time)}${esc(j.time || 'время не назначено')}${tag}</div>
     <b dir="auto">${esc(j.name || '+' + j.phone)}</b>
     <div class="m">${esc([j.service, j.area && j.area + ' м²'].filter(Boolean).join(' · '))}</div>
     ${j.district ? `<div class="m" dir="auto">${ico(ICONS.pin)}${esc(j.district)}</div>` : ''}
     ${j.price ? `<span class="p">${esc(j.price)}</span>` : ''}
   </div>`;
 }
+
+/* ───── уборка, заведённая руками ─────
+   В расписание попадает не только то, что прошло через бота: клиент звонит,
+   приходит по сарафану или заказывает постоянно. Без ручной записи календарь
+   показывает неправду, и им перестают пользоваться. */
+const jobDlg = $('#job-dlg');
+let jobEditing = null;
+
+function openJob(job = {}) {
+  jobEditing = job.kind === 'manual' ? job : null;
+  const form = $('#job-form');
+  form.reset();
+  for (const [k, v] of Object.entries(job)) {
+    const el = form.elements[k];
+    if (el && v != null) el.value = v;
+  }
+  $('#job-ttl').textContent = jobEditing ? 'Уборка' : 'Новая уборка';
+  $('#job-sub').textContent = jobEditing
+    ? 'заведена вручную, без заявки в чате'
+    : 'клиент позвонил или пришёл не из чата';
+  $('#job-del').style.display = jobEditing ? '' : 'none';
+  jobDlg.showModal();
+  form.elements.name.focus();
+}
+
+jobDlg && (() => {
+  const form = $('#job-form');
+  const close = () => jobDlg.close();
+  $('#job-x').onclick = close;
+  $('#job-cancel').onclick = close;
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const body = Object.fromEntries(new FormData(form).entries());
+    try {
+      await api(jobEditing ? `/api/jobs/${jobEditing.id}` : '/api/jobs',
+        { method: 'POST', body: JSON.stringify(body) });
+      close();
+      toast(jobEditing ? 'Уборка обновлена' : 'Уборка в расписании');
+      renderCal();
+    } catch (err) { toast(err.message, true); }
+  };
+  $('#job-del').onclick = async () => {
+    if (!jobEditing || !confirm('Убрать эту уборку из расписания?')) return;
+    try {
+      await api(`/api/jobs/${jobEditing.id}`, { method: 'DELETE' });
+      close();
+      toast('Уборка удалена');
+      renderCal();
+    } catch (err) { toast(err.message, true); }
+  };
+})();
 
 /* ───── доска: обзор воронки ─────
    Список отвечает на «кому ответить сейчас», доска — на «где что застряло
