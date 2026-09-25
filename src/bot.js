@@ -594,6 +594,42 @@ export async function runFollowUps() {
 }
 setInterval(runFollowUps, 6e5).unref?.();     // каждые 10 минут
 
+/**
+ * Неотвеченные сообщения. Ответ откладывается на несколько секунд, чтобы
+ * дождаться, пока клиент допишет очередь реплик, — и живёт этот таймер в памяти.
+ * Перезапуск (деплой, падение, переезд контейнера) его теряет: клиент написал и
+ * не получил ничего. Здесь подбираем такие диалоги и отвечаем с опозданием.
+ */
+export async function answerMissed() {
+  if (getSetting('ai_global') !== '1') return;
+  const rows = db.prepare(`
+    SELECT c.*, (SELECT body FROM messages m WHERE m.conv_id = c.id AND m.direction = 'in'
+                 ORDER BY m.id DESC LIMIT 1) AS last_in_body
+    FROM conversations c
+    WHERE c.status != 'closed' AND c.ai_enabled = 1 AND c.needs_human = 0
+      AND EXISTS (
+        SELECT 1 FROM messages m WHERE m.conv_id = c.id AND m.direction = 'in'
+          AND m.id > COALESCE((SELECT max(o.id) FROM messages o WHERE o.conv_id = c.id
+                AND o.direction = 'out' AND o.author IN ('ai','human')
+                AND (o.kind IS NULL OR o.kind <> 'interim')), 0)
+          -- свежие не трогаем: по ним ещё идёт обычная отложенная отправка
+          AND m.created_at <= datetime('now', '-3 minutes')
+          AND m.created_at >= datetime('now', '-12 hours'))
+    ORDER BY c.last_at DESC LIMIT 5`).all();
+
+  for (const conv of rows) {
+    console.log(`[догоняем] диалог ${conv.id}: клиент остался без ответа`);
+    try {
+      await respond(conv.id, channel, conv.last_in_body || '');
+    } catch (e) {
+      console.error('догоняющий ответ:', e.message);
+    }
+  }
+}
+setInterval(answerMissed, 3e5).unref?.();     // каждые 5 минут
+// после перезапуска отвечаем на то, что потерялось, не дожидаясь первого интервала
+setTimeout(answerMissed, 3e4).unref?.();
+
 // раз в час подчищаем заявки, по которым давно нет движения
 setInterval(() => {
   const n = sweepStale();
