@@ -45,6 +45,12 @@ const PHRASES = {
     he: 'מסתכלת על הסרטון, רגע',
     en: 'Watching the video, one moment'
   },
+  longVideo: {
+    ru: 'Видео длинное, передаю коллеге - она посмотрит и напишет вам.',
+    uk: 'Відео довге, передаю колезі - вона подивиться і напише вам.',
+    he: 'הסרטון ארוך, מעבירה לנציגה - היא תצפה ותחזור אליכם.',
+    en: "The video is long, I'm passing it to my colleague - she'll watch it and get back to you."
+  },
   human: {
     ru: 'Секунду, подключаю менеджера.',
     uk: 'Секунду, підключаю менеджера.',
@@ -53,7 +59,7 @@ const PHRASES = {
   }
 };
 const phrase = (key, convId, text = '') =>
-  PHRASES[key][dominantLang(history(convId, 10)) || detectLang(text) || 'ru'] ?? PHRASES[key].ru;
+  PHRASES[key][dominantLang(history(convId, 10)) || (text ? detectLang(text) : '') || 'ru'] ?? PHRASES[key].ru;
 
 /** Приветствие хранится строками вида «uk: текст»; берём подходящее, иначе первое. */
 function pickGreeting(text) {
@@ -157,7 +163,31 @@ function scheduleReply(convId, ch, text) {
 }
 
 /** Входящее сообщение клиента: сохранить → при включённом ИИ поставить ответ в очередь. */
-export async function handleIncoming({ phone, name, text, wa_id, chat_id = null, media = [], ref = null }, ch = channel) {
+/**
+ * Приём сообщения. Обёртка существует ради одной строчки — catch: раньше любая
+ * ошибка здесь (сбойный ролик, недоступный ffmpeg) всплывала в обработчик событий
+ * канала, становилась unhandled rejection и роняла процесс. Клиент видел «смотрю
+ * видео, минутку» и тишину, а сервис молча перезапускался.
+ */
+export async function handleIncoming(msg, ch = channel) {
+  try {
+    await processIncoming(msg, ch);
+  } catch (e) {
+    console.error('обработка сообщения:', e.stack || e.message);
+    const conv = db.prepare('SELECT * FROM conversations WHERE channel=? AND phone=?').get(ch.name, msg.phone);
+    if (!conv) return;
+    flagHuman(conv.id, 'сбой при обработке сообщения — ответьте сами');
+    addMessage(conv.id, { direction: 'out', author: 'system', body: 'Сбой при обработке: ' + e.message, error: '1' });
+    try {
+      await adapterFor(conv).send(conv, phrase('human', conv.id, msg.text || ''));
+      addMessage(conv.id, { direction: 'out', author: 'ai', body: phrase('human', conv.id, msg.text || '') });
+    } catch {}
+    emit('conversations', null);
+    emit('message', { conv_id: conv.id });
+  }
+}
+
+async function processIncoming({ phone, name, text, wa_id, chat_id = null, media = [], ref = null }, ch = channel) {
   if (messageExists(wa_id)) return;   // повторная доставка того же вебхука
   if (blocked(phone)) {
     // вложение канал уже сохранил на диск — за номером из чёрного списка не храним
@@ -217,7 +247,7 @@ export async function handleIncoming({ phone, name, text, wa_id, chat_id = null,
       const note = phrase('video', conv.id, text);
       try {
         await adapterFor(fresh).send(fresh, note);
-        addMessage(conv.id, { direction: 'out', author: 'ai', body: note });
+        addMessage(conv.id, { direction: 'out', author: 'ai', body: note, kind: 'interim' });
         emit('message', { conv_id: conv.id });
       } catch {}
     }
@@ -235,7 +265,16 @@ export async function handleIncoming({ phone, name, text, wa_id, chat_id = null,
     emit('message', { conv_id: conv.id });
     if (long) {
       flagHuman(conv.id, `видео на ${long.minutes} мин — длиннее ${videoLimitMinutes()}, посмотрите сами`);
+      // клиент только что получил «смотрю видео» — уйти в тишину нельзя
+      try {
+        const say = phrase('longVideo', conv.id, text);
+        await adapterFor(fresh).send(fresh, say);
+        addMessage(conv.id, { direction: 'out', author: 'ai', body: say });
+      } catch (e) {
+        console.error('не отправилось сообщение о длинном видео:', e.message);
+      }
       emit('conversations', null);
+      emit('message', { conv_id: conv.id });
       return;
     }
   }
@@ -253,8 +292,11 @@ async function respond(convId, ch, text) {
   // Клиенту уже ответили на всё, что он написал. Так бывает, когда сообщение
   // пришло, пока бот отвечал на предыдущее: очередь запускала второй ответ,
   // и модель, не увидев ничего нового, переспрашивала то же самое.
+  // «Смотрю видео, минутку» — не ответ, а знак, что бот на связи: если считать
+  // его ответом, настоящая реплика после разбора ролика уже не уйдёт
   const lastOut = db.prepare(`SELECT id FROM messages WHERE conv_id=? AND direction='out'
-    AND author IN ('ai','human') ORDER BY id DESC LIMIT 1`).get(convId)?.id ?? 0;
+    AND author IN ('ai','human') AND (kind IS NULL OR kind <> 'interim')
+    ORDER BY id DESC LIMIT 1`).get(convId)?.id ?? 0;
   const hasNew = db.prepare("SELECT 1 FROM messages WHERE conv_id=? AND direction='in' AND id > ?")
     .get(convId, lastOut);
   if (!hasNew) return;

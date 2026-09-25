@@ -12,6 +12,18 @@ import { sttLabel } from './stt.js';
 import { notifyManagers } from './notify.js';
 import { aiConfigured, aiLabel } from './ai.js';
 
+/* ─────────── Процесс не должен умирать молча ───────────
+   Необработанная ошибка в обработчике событий WhatsApp роняла Node: клиент
+   оставался без ответа, а сервис перезапускался хостингом без следа в диалоге.
+   Лучше остаться в живых и позвать человека. */
+const crashNote = (kind) => (e) => {
+  console.error(`${kind}:`, e?.stack || e?.message || e);
+  notifyManagers(`⚠️ Сбой в работе бота: ${String(e?.message || e).slice(0, 150)}\nЕсли клиенты пишут без ответа - ответьте вручную.`)
+    .catch(() => {});
+};
+process.on('unhandledRejection', crashNote('необработанная ошибка'));
+process.on('uncaughtException', crashNote('необработанное исключение'));
+
 const app = express();
 app.use(express.json({ limit: '25mb' }));   // фото приходят base64 из симулятора
 
