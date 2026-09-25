@@ -33,6 +33,28 @@ export const emit = (event, data) => {
   for (const fn of listeners) { try { fn(event, data); } catch {} }
 };
 
+/**
+ * Служебные фразы бота — не ответ модели, а текст из кода: «сейчас посмотрю
+ * видео», «подключаю менеджера». Их тоже надо говорить на языке клиента:
+ * женщина пишет на иврите, а в ответ прилетает русский — выглядит как чужой чат.
+ */
+const PHRASES = {
+  video: {
+    ru: 'Смотрю видео, минутку',
+    uk: 'Дивлюсь відео, хвилинку',
+    he: 'מסתכלת על הסרטון, רגע',
+    en: 'Watching the video, one moment'
+  },
+  human: {
+    ru: 'Секунду, подключаю менеджера.',
+    uk: 'Секунду, підключаю менеджера.',
+    he: 'רגע, מחברת אתכם לנציג.',
+    en: 'One moment, connecting you with a manager.'
+  }
+};
+const phrase = (key, convId, text = '') =>
+  PHRASES[key][dominantLang(history(convId, 10)) || detectLang(text) || 'ru'] ?? PHRASES[key].ru;
+
 /** Приветствие хранится строками вида «uk: текст»; берём подходящее, иначе первое. */
 function pickGreeting(text) {
   const raw = (getSetting('greeting') || '').trim();
@@ -192,7 +214,7 @@ export async function handleIncoming({ phone, name, text, wa_id, chat_id = null,
   if (clips.length && aiProvider.configured()) {
     const lengths = await Promise.all(clips.map((c) => duration(c.file)));
     if (Math.max(...lengths) > (Number(process.env.VIDEO_NOTE_SECONDS) || 20)) {
-      const note = 'Смотрю видео, минутку';
+      const note = phrase('video', conv.id, text);
       try {
         await adapterFor(fresh).send(fresh, note);
         addMessage(conv.id, { direction: 'out', author: 'ai', body: note });
@@ -268,7 +290,7 @@ async function respond(convId, ch, text) {
     // Одно сообщение на диалог: дальше отвечает менеджер, которому уже ушло уведомление.
     const silent = !db.prepare("SELECT 1 FROM messages WHERE conv_id=? AND direction='out' AND author IN ('ai','human') LIMIT 1").get(conv.id);
     if (silent) {
-      const hello = [pickGreeting(text), 'Секунду, подключаю менеджера.'].filter(Boolean).join('\n');
+      const hello = [pickGreeting(text), phrase('human', conv.id, text)].filter(Boolean).join('\n');
       try {
         const wa = (await adapterFor(fresh).send(fresh, hello)).wa_id;
         addMessage(conv.id, { direction: 'out', author: 'ai', body: hello, wa_id: wa });
