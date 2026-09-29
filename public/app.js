@@ -94,19 +94,30 @@ const COLUMNS = [
   { k:'manager', t:'У менеджера',   c:'var(--s1)',     hint:'человек ведёт сам' },
   { k:'ai',      t:'ИИ уточняет',   c:'var(--accent)', hint:'бот собирает заявку' },
   { k:'quoted',  t:'Назвали цену',  c:'var(--s4)',     hint:'ждём решения клиента' },
-  { k:'agreed',  t:'Договорились',  c:'var(--s3)',     hint:'дата согласована' },
-  { k:'closed',  t:'Закрыто',       c:'var(--muted)',  hint:'выполнено или отказ' }
+  { k:'agreed',  t:'Договорились',  c:'var(--s3)',     hint:'дата согласована' }
 ];
+// Архив — не одна куча «закрыто»: там вперемешку свои сотрудники, живые лиды
+// «не сейчас» и настоящие отказы. С одной колонкой это невозможно разобрать.
+const ARCHIVE = [
+  { k:'staff',   t:'Сотрудники',    c:'var(--s1)',     hint:'свои номера, не клиенты' },
+  { k:'later',   t:'На потом',      c:'var(--s4)',     hint:'лид живой, но не сейчас' },
+  { k:'refused', t:'Отказ',         c:'var(--muted)',  hint:'не релевантно или клиент отказался' }
+];
+const ALL_COLS = [...COLUMNS, ...ARCHIVE];
+const isArchive = (k) => ARCHIVE.some((x) => x.k === k);
+
 function columnOf(c) {
   const st = lead(c).stage;
-  if (c.status === 'closed' || st === 'отказ') return 'closed';
+  if (c.status === 'closed' || st === 'отказ') {
+    return ARCHIVE.some((x) => x.k === c.archive) ? c.archive : 'refused';
+  }
   if (c.needs_human) return 'need';
   if (['готов к заказу', 'дата согласована'].includes(st)) return 'agreed';
   if (st === 'назвали цену') return 'quoted';
   if (c.status === 'human') return 'manager';
   return 'ai';
 }
-const colTitle = (k) => COLUMNS.find((x) => x.k === k).t;
+const colTitle = (k) => (ALL_COLS.find((x) => x.k === k) || { t: k }).t;
 
 const matches = (c) => {
   // на доске чужие колонки только приглушаются, фильтрует лишь список
@@ -126,8 +137,8 @@ function chipFor(c) {
 const PAGES = {
   dash:     { title: 'Сводка',    tpl: 'tpl-dash',  render: renderDash,  tools: dashTools },
   inbox:    { title: 'Заявки',
-              get tpl() { return leadView === 'board' ? 'tpl-board' : 'tpl-inbox'; },
-              render: () => (leadView === 'board' ? renderBoard() : renderLeads()),
+              get tpl() { return leadView === 'list' ? 'tpl-inbox' : 'tpl-board'; },
+              render: () => (leadView === 'list' ? renderLeads() : renderBoard()),
               tools: leadsTools },
   cal:      { title: 'Расписание', tpl: 'tpl-cal',  render: renderCal,   tools: calTools },
   settings: { title: 'Настройки', tpl: null,        render: renderSettings, tools: () => '' }
@@ -162,6 +173,7 @@ function leadsTools() {
   return `<div class="seg" id="view-seg">
       <button data-v="list" class="${leadView === 'list' ? 'on' : ''}">Список</button>
       <button data-v="board" class="${leadView === 'board' ? 'on' : ''}">Доска</button>
+      <button data-v="archive" class="${leadView === 'archive' ? 'on' : ''}">Архив</button>
     </div>
     <div class="hstat" id="hstat"></div>` + searchTool()
     + `<button class="btn" id="csv">CSV</button>`;
@@ -590,6 +602,28 @@ function subLine(n) {
   if (x) x.onclick = () => setStage(null);
 }
 
+/**
+ * Перенос карточки. Проверяем результат, а не верим себе на слово: раньше тост
+ * говорил «перенесено», сервер менял только стадию, флаг «нужен человек»
+ * оставался — и карточка возвращалась на место. Теперь расхождение видно сразу.
+ */
+async function moveTo(id, key) {
+  try {
+    const updated = await api(`/api/conversations/${id}/column`, { method: 'POST', body: JSON.stringify({ column: key }) });
+    const landed = columnOf(updated);
+    if (landed === key) toast('Перенесено в «' + colTitle(key) + '»');
+    else toast(`Не удалось перенести: заявка осталась в «${colTitle(landed)}»`, true);
+    const i = convs.findIndex((c) => c.id === id);
+    if (i >= 0) convs[i] = { ...convs[i], ...updated };
+    loadList();
+    if (current === id) openConv(id, drawerOpen);
+    return landed === key;
+  } catch (e) {
+    toast(e.message, true);
+    return false;
+  }
+}
+
 function setStage(k) {
   stageFilter = k;
   $('.app').classList.remove('menu-open');
@@ -601,31 +635,44 @@ function setStage(k) {
 function renderFunnel() {
   const box = $('#funnel');
   if (!box) return;
-  const by = Object.fromEntries(COLUMNS.map((x) => [x.k, 0]));
+  const by = Object.fromEntries(ALL_COLS.map((x) => [x.k, 0]));
   convs.forEach((c) => by[columnOf(c)]++);
   const bar = COLUMNS.filter((x) => by[x.k])
     .map((x) => `<i style="flex:${by[x.k]};background:${x.c}" title="${x.t}: ${by[x.k]}"></i>`).join('')
     || '<i style="flex:1;background:var(--border)"></i>';
+  const archived = ARCHIVE.reduce((a, x) => a + by[x.k], 0);
   box.innerHTML = `<div class="fbar">${bar}</div>` + COLUMNS.map((x) => {
     const cls = [stageFilter === x.k && 'on', !by[x.k] && 'zero', x.k === 'need' && by[x.k] && 'alert']
       .filter(Boolean).join(' ');
     return `<a class="frow ${cls}" data-k="${x.k}"><span class="fdot" style="--c:${x.c}"></span>
       <span class="lbl">${x.t}</span><span class="fn">${by[x.k]}</span></a>`;
-  }).join('');
-  $$('.frow', box).forEach((r) => r.onclick = () => setStage(stageFilter === r.dataset.k ? null : r.dataset.k));
+  }).join('')
+  // архив одной строкой: внутри него свои корзины, и ими не фильтруют воронку
+  + `<a class="frow arch ${archived ? '' : 'zero'}" data-arch="1"><span class="fdot" style="--c:var(--muted)"></span>
+      <span class="lbl">Архив</span><span class="fn">${archived}</span></a>`;
+  $$('.frow[data-k]', box).forEach((r) => r.onclick = () => setStage(stageFilter === r.dataset.k ? null : r.dataset.k));
+  const arch = box.querySelector('[data-arch]');
+  if (arch) arch.onclick = () => {
+    stageFilter = null;
+    leadView = 'archive';
+    localStorage.setItem('leadView', leadView);
+    $('.app').classList.remove('menu-open');
+    go('inbox');
+  };
 }
 
 function renderBoard() {
   const board = $('#board');
   if (!board || dragging) return;
-  const rows = convs.filter(matches);
-  const by = Object.fromEntries(COLUMNS.map((x) => [x.k, []]));
+  const cols = leadView === 'archive' ? ARCHIVE : COLUMNS;
+  const rows = convs.filter(matches).filter((c) => isArchive(columnOf(c)) === (leadView === 'archive'));
+  const by = Object.fromEntries(ALL_COLS.map((x) => [x.k, []]));
   rows.forEach((c) => by[columnOf(c)].push(c));
   subLine(rows.length);
   renderHeaderStats();
 
   const wip = Number(state.wip_need) || 0;
-  board.innerHTML = COLUMNS.map((col) => {
+  board.innerHTML = cols.map((col) => {
     const items = by[col.k];
     const money = items.reduce((a, c) => a + (Number(String(lead(c).price_quote || '').replace(/[^\d]/g, '')) || 0), 0);
     const over = col.k === 'need' && wip && items.length > wip;
@@ -653,9 +700,7 @@ function renderBoard() {
       const id = Number(e.dataTransfer.getData('text/plain'));
       const conv = convs.find((c) => c.id === id);
       if (!conv || columnOf(conv) === col.dataset.col) return;
-      await api(`/api/conversations/${id}/column`, { method: 'POST', body: JSON.stringify({ column: col.dataset.col }) });
-      toast('Перенесено в «' + colTitle(col.dataset.col) + '»');
-      loadList();
+      await moveTo(id, col.dataset.col);
     };
   });
 }
@@ -667,7 +712,7 @@ const COLLAPSED = new Set(JSON.parse(localStorage.getItem('collapsed') || '[]'))
 
 function rowHtml(c) {
   const l = lead(c);
-  const col = COLUMNS.find((x) => x.k === columnOf(c));
+  const col = ALL_COLS.find((x) => x.k === columnOf(c));
   // В строке только то, что нужно для выбора: кто, о чём и на сколько.
   // Тип уборки, площадь, район и дата целиком показаны в карточке справа —
   // их дублирование в узкой колонке раздувало строку до 150 пикселей.
@@ -690,13 +735,13 @@ function renderLeads() {
   const box = $('#list');
   if (!box) return;
   const rows = convs.filter(matches);
-  const by = Object.fromEntries(COLUMNS.map((x) => [x.k, []]));
+  const by = Object.fromEntries(ALL_COLS.map((x) => [x.k, []]));
   rows.forEach((c) => by[columnOf(c)].push(c));
   subLine(rows.length);
   renderHeaderStats();
 
   const wip = Number(state.wip_need) || 0;
-  box.innerHTML = COLUMNS.map((col) => {
+  box.innerHTML = ALL_COLS.map((col) => {
     const items = by[col.k];
     // пустые группы не показываем: они занимали место и подсказка в строке
     // читалась как содержимое. Исключение — очередь «Нужен человек»:
@@ -795,10 +840,21 @@ function bindChat(root) {
   $$('img', root).forEach((i) => i.onclick = () => window.open(i.src, '_blank'));
   q('[data-a="takeover"]') && (q('[data-a="takeover"]').onclick = () => setMode(false));
   q('[data-a="giveback"]') && (q('[data-a="giveback"]').onclick = () => setMode(true));
-  q('[data-a="close"]').onclick = async () => {
-    await api(`/api/conversations/${c.id}/status`, { method: 'POST',
-      body: JSON.stringify({ status: c.status === 'closed' ? 'human' : 'closed' }) });
-    openConv(c.id, drawerOpen);
+  // В архиве три корзины, и выбирать её должен человек: свои сотрудники,
+  // живой лид «не сейчас» и настоящий отказ — это разные вещи.
+  q('[data-a="close"]').onclick = (e) => {
+    if (c.status === 'closed') return moveTo(c.id, 'manager');
+    const old = root.querySelector('.pickmenu');
+    if (old) return old.remove();
+    const menu = document.createElement('div');
+    menu.className = 'pickmenu';
+    menu.innerHTML = '<div class="hint">В архив, в какую корзину?</div>'
+      + ARCHIVE.map((x) => `<div data-k="${x.k}"><b>${x.t}</b><span>${x.hint}</span></div>`).join('');
+    e.currentTarget.parentElement.appendChild(menu);
+    $$('div[data-k]', menu).forEach((d) => d.onclick = () => { menu.remove(); moveTo(c.id, d.dataset.k); });
+    setTimeout(() => document.addEventListener('click', function off(ev) {
+      if (!menu.contains(ev.target)) { menu.remove(); document.removeEventListener('click', off); }
+    }), 0);
   };
   const inp = q('[data-r="inp"]');
   inp.oninput = () => { inp.style.height = 'auto'; inp.style.height = Math.min(inp.scrollHeight, 140) + 'px'; };
@@ -945,8 +1001,12 @@ function leadHtml(c) {
       <a class="btn" href="tel:+${esc(c.phone)}">${ico('<path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1.9.4 1.8.7 2.7a2 2 0 0 1-.5 2.1L8 9.8a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.7.7a2 2 0 0 1 1.7 2z"/>')}Позвонить</a>
       <a class="btn" href="https://wa.me/${esc(c.phone)}" target="_blank" rel="noopener">${ico('<path d="M3 21l1.6-4.7A8.5 8.5 0 1 1 8 19.6z"/>')}WhatsApp</a>
     </div>
-    <div class="kv"><dt>Колонка</dt><dd><select data-r="col">${COLUMNS.map((x) =>
-      `<option value="${x.k}" ${columnOf(c) === x.k ? 'selected' : ''}>${x.t}</option>`).join('')}</select></dd></div>
+    <div class="kv"><dt>Колонка</dt><dd><select data-r="col">
+      <optgroup label="В работе">${COLUMNS.map((x) =>
+        `<option value="${x.k}" ${columnOf(c) === x.k ? 'selected' : ''}>${x.t}</option>`).join('')}</optgroup>
+      <optgroup label="Архив">${ARCHIVE.map((x) =>
+        `<option value="${x.k}" ${columnOf(c) === x.k ? 'selected' : ''}>${x.t}</option>`).join('')}</optgroup>
+    </select></dd></div>
     <div class="kv"><dt>Телефон</dt><dd>+${esc(c.phone)}</dd></div>
     <div class="kv"><dt>Имя</dt><dd dir="auto">${esc(l.name || c.name || '—')}</dd></div>
     <div class="kv"><dt>Записан на</dt><dd>${c.job_date
@@ -978,12 +1038,7 @@ function leadHtml(c) {
 
 function bindLead(root, convId) {
   const col = root.querySelector('[data-r="col"]');
-  if (col) col.onchange = async () => {
-    await api(`/api/conversations/${convId}/column`, { method: 'POST', body: JSON.stringify({ column: col.value }) });
-    toast('Перенесено в «' + colTitle(col.value) + '»');
-    loadList();
-    openConv(convId, drawerOpen);
-  };
+  if (col) col.onchange = () => moveTo(convId, col.value);
   const ta = root.querySelector('[data-r="note"]');
   if (ta) ta.onblur = async () => {
     await api(`/api/conversations/${convId}/note`, { method: 'POST', body: JSON.stringify({ note: ta.value }) });

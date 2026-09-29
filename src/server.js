@@ -485,39 +485,54 @@ app.post('/api/conversations/:id/mode', (req, res) => {
  * а комбинация владельца диалога (ИИ или человек) и стадии воронки,
  * поэтому раскладываем её здесь, в одном месте.
  */
+/**
+ * Куда попадает карточка при переносе. Раньше «назвали цену» и «договорились»
+ * меняли только стадию — а если у диалога стоял флаг «нужен человек», карточка
+ * оставалась в своей колонке: тост говорил «перенесено», и ничего не менялось.
+ * Поэтому каждое действие теперь явно отвечает за три вещи: флаг человека,
+ * статус и стадию.
+ */
 const COLUMN_ACTIONS = {
   need:    { ai: 0, status: 'human', needs: 1, reason: 'передано менеджеру вручную' },
-  // возврат в работу откатывает и стадию: иначе карточка со стадией «договорились»
-  // осталась бы в своей колонке и перетаскивание выглядело бы сломанным
   manager: { ai: 0, status: 'human', needs: 0, stage: 'уточняем' },
   ai:      { ai: 1, status: 'ai',    needs: 0, stage: 'уточняем' },
-  quoted:  { stage: 'назвали цену' },
-  agreed:  { stage: 'дата согласована' },
-  closed:  { status: 'closed' }
+  quoted:  { needs: 0, stage: 'назвали цену' },
+  agreed:  { needs: 0, stage: 'дата согласована' },
+  // архив: три корзины вместо одной кучи «закрыто»
+  staff:   { status: 'closed', needs: 0, archive: 'staff' },
+  later:   { status: 'closed', needs: 0, archive: 'later' },
+  refused: { status: 'closed', needs: 0, archive: 'refused', stage: 'отказ' }
 };
+COLUMN_ACTIONS.closed = COLUMN_ACTIONS.refused;   // старое имя колонки
 
 app.post('/api/conversations/:id/column', (req, res) => {
   const id = Number(req.params.id);
-  const act = COLUMN_ACTIONS[String(req.body.column)];
+  const key = String(req.body.column);
+  const act = COLUMN_ACTIONS[key];
   if (!act) return res.status(400).json({ error: 'Неизвестная колонка' });
 
   const conv = getConversation(id);
   if (!conv) return res.sendStatus(404);
 
-  if ('ai' in act) {
-    db.prepare('UPDATE conversations SET ai_enabled=?, status=?, needs_human=?, handoff_reason=? WHERE id=?')
-      .run(act.ai, act.status, act.needs, act.reason ?? null, id);
+  const lead = JSON.parse(conv.lead || '{}');
+  if (act.stage) lead.stage = act.stage;
+  // «отказ» в стадии держит карточку в архиве, куда бы её ни перенесли
+  if (!act.archive && lead.stage === 'отказ') lead.stage = act.stage || 'уточняем';
+
+  const set = { lead: JSON.stringify(lead) };
+  if ('ai' in act) set.ai_enabled = act.ai;
+  if ('needs' in act) {
+    set.needs_human = act.needs;
+    set.handoff_reason = act.needs ? (act.reason ?? conv.handoff_reason ?? 'передано вручную') : null;
   }
-  if (act.status === 'closed') {
-    db.prepare("UPDATE conversations SET status='closed' WHERE id=?").run(id);
-  }
-  if (act.stage) {
-    // стадия живёт внутри карточки заявки — её же заполняет ИИ
-    const lead = { ...JSON.parse(conv.lead || '{}'), stage: act.stage };
-    db.prepare('UPDATE conversations SET lead=? WHERE id=?').run(JSON.stringify(lead), id);
-    // вернуть из «закрыто» обратно в работу
-    if (conv.status === 'closed') db.prepare("UPDATE conversations SET status='human' WHERE id=?").run(id);
-  }
+  // вернуть из архива в работу, если переносят в рабочую колонку
+  set.status = act.status ?? (conv.status === 'closed' ? 'human' : conv.status);
+  set.archive = act.archive ?? null;
+
+  const keys = Object.keys(set);
+  db.prepare(`UPDATE conversations SET ${keys.map((k) => `${k}=?`).join(',')} WHERE id=?`)
+    .run(...keys.map((k) => set[k]), id);
+
   emit('conversations', null);
   res.json(getConversation(id));
 });

@@ -97,6 +97,13 @@ if (!cols.includes('source_url')) db.exec('ALTER TABLE conversations ADD COLUMN 
 if (!cols.includes('source_ref')) db.exec('ALTER TABLE conversations ADD COLUMN source_ref TEXT');
 // весь ответ рекламной площадки целиком: по нему видно, что вообще прислала Meta
 if (!cols.includes('source_raw')) db.exec('ALTER TABLE conversations ADD COLUMN source_raw TEXT');
+// Архив делится на корзины: свои сотрудники, «не сейчас, но лид живой» и отказ.
+// Одной кучей «закрыто» пользоваться нельзя — там вперемешку и коллеги, и клиенты.
+if (!cols.includes('archive')) {
+  db.exec('ALTER TABLE conversations ADD COLUMN archive TEXT');
+  // что уже закрыто, кладём в «отказ»: разобрать по корзинам можно перетаскиванием
+  db.exec("UPDATE conversations SET archive='refused' WHERE status='closed'");
+}
 // Деньги в трёх состояниях. Оценка бота живёт в карточке (lead.price_quote) и
 // точной не является; согласованную сумму и оплату проставляет человек —
 // иначе в отчёте «средний чек» считается по цифрам, которые никто не подтверждал.
