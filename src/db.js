@@ -317,6 +317,10 @@ for (const [key, value] of Object.entries(FRESH)) {
   }
 }
 
+// Закрытая заявка никого не ждёт: флаг «нужен человек» на ней — след прошлого,
+// из-за которого в архиве висело «ждёт 15 ч». Дёшево и идемпотентно.
+db.exec("UPDATE conversations SET needs_human=0 WHERE status='closed' AND needs_human=1");
+
 export const getSetting = (k) =>
   db.prepare('SELECT value FROM settings WHERE key = ?').get(k)?.value ?? null;
 

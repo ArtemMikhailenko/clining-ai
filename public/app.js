@@ -127,7 +127,28 @@ const matches = (c) => {
   return (c.name || '').toLowerCase().includes(q) || String(c.phone).includes(q)
     || (c.summary || '').toLowerCase().includes(q) || (c.last_body || '').toLowerCase().includes(q);
 };
+/**
+ * Перерисовка без прыжка к началу списка. Список обновляется сам каждые
+ * полминуты и на каждое входящее сообщение: человек листал заявки, и его
+ * возвращало наверх. Если разметка не изменилась — DOM не трогаем вовсе,
+ * а если изменилась, возвращаем прокрутку на место.
+ */
+function paint(box, html) {
+  if (box.innerHTML === html) return;
+  const top = box.scrollTop, left = box.scrollLeft;
+  const inner = new Map([...box.children].map((el) => [el.dataset.col ?? el.dataset.g, el.querySelector('.colm-body')?.scrollTop]));
+  box.innerHTML = html;
+  box.scrollTop = top;
+  box.scrollLeft = left;
+  for (const el of box.children) {
+    const body = el.querySelector('.colm-body');
+    const was = inner.get(el.dataset.col ?? el.dataset.g);
+    if (body && was) body.scrollTop = was;
+  }
+}
+
 function chipFor(c) {
+  if (c.status === 'closed') return '<span class="chip closed">в архиве</span>';
   if (c.needs_human) return '<span class="chip need">нужен человек</span>';
   return ({ ai:'<span class="chip ai">ИИ ведёт</span>', human:'<span class="chip human">менеджер</span>',
     closed:'<span class="chip closed">закрыта</span>', new:'<span class="chip ai">новая</span>' })[c.status] ?? '';
@@ -210,7 +231,7 @@ function bindTools() {
 function renderHeaderStats() {
   const el = $('#hstat');
   if (!el) return;
-  const need = convs.filter((c) => c.needs_human).length;
+  const need = convs.filter((c) => c.needs_human && c.status !== 'closed').length;
   const active = convs.filter((c) => c.status !== 'closed').length;
   // в воронке считаем согласованные суммы, а где их нет — оценку бота:
   // иначе цифра в шапке живёт своей жизнью и ей перестают верить
@@ -563,7 +584,8 @@ jobDlg && (() => {
    Список отвечает на «кому ответить сейчас», доска — на «где что застряло
    и где деньги». Это разные вопросы, поэтому оба вида нужны. */
 function waitHtml(c) {
-  if (!c.needs_human || !c.last_in_at) return '';
+  // в архиве «ждёт 15 ч» — вранье: заявку закрыли, никто её не ждёт
+  if (!c.needs_human || !c.last_in_at || c.status === 'closed') return '';
   const min = Math.floor((Date.now() - dt(c.last_in_at)) / 6e4);
   return `<span class="wait ${min >= 10 ? 'hot' : ''}">ждёт ${min < 60 ? min + ' мин' : Math.floor(min / 60) + ' ч'}</span>`;
 }
@@ -672,7 +694,7 @@ function renderBoard() {
   renderHeaderStats();
 
   const wip = Number(state.wip_need) || 0;
-  board.innerHTML = cols.map((col) => {
+  paint(board, cols.map((col) => {
     const items = by[col.k];
     const money = items.reduce((a, c) => a + (Number(String(lead(c).price_quote || '').replace(/[^\d]/g, '')) || 0), 0);
     const over = col.k === 'need' && wip && items.length > wip;
@@ -684,7 +706,7 @@ function renderBoard() {
       ${over ? '<div class="wip-warn">Очередь переполнена — клиенты ждут слишком долго</div>' : ''}
       <div class="colm-body">${items.map(cardHtml).join('')
         || `<div class="colm-empty">${col.hint}</div>`}</div></div>`;
-  }).join('');
+  }).join(''));
 
   if (stageFilter) board.querySelector(`[data-col="${stageFilter}"]`)?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   $$('.card', board).forEach((el) => {
@@ -741,7 +763,7 @@ function renderLeads() {
   renderHeaderStats();
 
   const wip = Number(state.wip_need) || 0;
-  box.innerHTML = ALL_COLS.map((col) => {
+  paint(box, ALL_COLS.map((col) => {
     const items = by[col.k];
     // пустые группы не показываем: они занимали место и подсказка в строке
     // читалась как содержимое. Исключение — очередь «Нужен человек»:
@@ -756,7 +778,7 @@ function renderLeads() {
         ${money ? `<span class="sum">${money.toLocaleString('ru-RU')} ₪</span>` : ''}
       </div>
       ${closed ? '' : items.map(rowHtml).join('')}`;
-  }).join('');
+  }).join(''));
 
   $$('.grp', box).forEach((g) => g.onclick = () => {
     const k = g.dataset.g;
