@@ -578,7 +578,8 @@ app.post('/api/sim/incoming', async (req, res) => {
   // симулятор всегда пишет в канал mock — ответ никуда наружу не уходит,
   // даже когда боевой WhatsApp подключён
   await handleIncoming({ phone: String(from), name: name || null, text: String(text || ''), media,
-    wa_id: 'sim-' + Date.now(), ref: req.body.ref || null }, channels.mock);
+    wa_id: 'sim-' + Date.now(), ref: req.body.ref || null,
+    fromMe: req.body.fromMe === true }, channels.mock);
   const conv = db.prepare('SELECT * FROM conversations WHERE channel=? AND phone=?').get('mock', String(from));
   res.json({ ok: true, conv_id: conv?.id, messages: conv ? history(conv.id, 200) : [] });
 });

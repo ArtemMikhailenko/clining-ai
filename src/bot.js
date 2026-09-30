@@ -172,7 +172,8 @@ function scheduleReply(convId, ch, text) {
  */
 export async function handleIncoming(msg, ch = channel) {
   try {
-    await processIncoming(msg, ch);
+    if (msg.fromMe) await processOutgoing(msg, ch);
+    else await processIncoming(msg, ch);
   } catch (e) {
     console.error('обработка сообщения:', e.stack || e.message);
     const conv = db.prepare('SELECT * FROM conversations WHERE channel=? AND phone=?').get(ch.name, msg.phone);
@@ -186,6 +187,27 @@ export async function handleIncoming(msg, ch = channel) {
     emit('conversations', null);
     emit('message', { conv_id: conv.id });
   }
+}
+
+/**
+ * Менеджер ответил клиенту сам, с телефона. Для диалога это значит одно:
+ * дальше ведёт человек. Бот замолкает, отложенный ответ отменяется, а само
+ * сообщение ложится в переписку — иначе в CRM видно половину разговора.
+ */
+async function processOutgoing({ phone, text, wa_id, chat_id = null, media = [] }, ch = channel) {
+  if (messageExists(wa_id)) return;        // наш же ответ после перезапуска
+  if (blocked(phone)) return;
+  const conv = getOrCreateConversation(ch.name, phone, null, chat_id);
+  if (!text && !media.length) return;
+
+  clearTimeout(timers.get(conv.id));       // бот собирался ответить — уже не нужно
+  timers.delete(conv.id);
+
+  const msg = addMessage(conv.id, { direction: 'out', author: 'human', body: text || '', wa_id, media });
+  db.prepare(`UPDATE conversations SET ai_enabled=0, status='human', needs_human=0,
+    handoff_reason=NULL, unread=0, nudges=0 WHERE id=?`).run(conv.id);
+  emit('message', { conv_id: conv.id, message: msg });
+  emit('conversations', null);
 }
 
 async function processIncoming({ phone, name, text, wa_id, chat_id = null, media = [], ref = null }, ch = channel) {

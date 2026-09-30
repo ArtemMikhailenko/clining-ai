@@ -197,15 +197,20 @@ async function connect() {
       if (type !== 'notify' && !(SELF_TEST && selfChat)) continue;
 
       if (sentIds.has(msg.key.id)) continue;                 // это наш собственный ответ
-      if (msg.key.fromMe && !(SELF_TEST && selfChat)) continue;
+      // Менеджер ответил клиенту прямо с телефона. Раньше такие сообщения
+      // выбрасывались: в CRM их не было, а бот не знал, что человек уже ответил,
+      // и мог написать следом своё. Теперь они попадают в переписку.
+      const byHand = Boolean(msg.key.fromMe) && !(SELF_TEST && selfChat);
       if (isJidGroup(jid) || isJidBroadcast(jid) || isJidNewsletter(jid) || isJidStatusBroadcast(jid)) continue;
       const text = textOf(msg);
       const attach = mediaKind(msg);
       if (!text && !attach) continue;     // реакции, служебное, неподдерживаемые типы
 
-      try {
-        await sock.readMessages([msg.key]);   // прочитано — как у живого менеджера
-      } catch {}
+      if (!byHand) {
+        try {
+          await sock.readMessages([msg.key]);   // прочитано — как у живого менеджера
+        } catch {}
+      }
 
       let media = [];
       if (attach) {
@@ -226,7 +231,8 @@ async function connect() {
         media,
         wa_id: msg.key.id ?? null,
         chat_id: jid,
-        ref: refOf(msg)
+        ref: refOf(msg),
+        fromMe: byHand
       });
     }
   });
