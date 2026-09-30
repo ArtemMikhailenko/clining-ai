@@ -48,6 +48,8 @@ const Answer = z.object({
   // «напишите после ремонта», «перезвоните в январе» — дата ГГГГ-ММ-ДД, когда напомнить о себе
   follow_up_at: z.string(),
   follow_up_note: z.string(),
+  // заявка не наша: обычная бытовая уборка или человек ищет работу
+  route: z.string(),              // '' / обычная уборка / ищет работу
   handoff_reason: z.string(),
   summary: z.string(),
   lead: Lead,
@@ -219,6 +221,9 @@ export async function generateReply(conv, messages, opts = {}) {
       + ' «0 метров? наверное, опечатка - сколько примерно?». Клиент не знает площадь — предложи посчитать по комнатам.',
     '- В lead заполняй только то, что клиент назвал или что точно видно на видео и фото; остальное — пустая строка.',
     '- lead_ready = true, только когда заявка собрана и в этом же ответе ты сказала, что передаёшь её коллеге.',
+    '- route = «обычная уборка», если клиенту нужна бытовая уборка, а не после ремонта.'
+      + ' route = «ищет работу», если человек спрашивает про вакансии. В обоих случаях needs_human = false:'
+      + ' менеджера звать не нужно, заявка уходит в архив.',
     '- needs_human = true, если нужен живой менеджер; в handoff_reason — коротко почему.',
     '- Вопрос «ты бот?» сам по себе — не повод звать менеджера: ответь честно и предложи. Зови, если клиент согласился.',
     '- messages пиши на языке последнего сообщения клиента. Это касается и фразы о передаче коллеге.',
@@ -373,6 +378,7 @@ export async function generateReply(conv, messages, opts = {}) {
     lead_ready: Boolean(out.lead_ready),
     follow_up_at: String(out.follow_up_at || '').trim(),
     follow_up_note: String(out.follow_up_note || '').trim(),
+    route: String(out.route || '').trim(),
     handoff_reason: out.handoff_reason || '',
     summary: out.summary || '',
     lead: {

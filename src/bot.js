@@ -10,6 +10,7 @@ import { notifyHandoff } from './notify.js';
 import { transcribe, sttConfigured } from './stt.js';
 import { analyzeVideo, duration, videoLimitMinutes } from './video.js';
 import { isStopRequest, cadence, missingFor, touchGoal, jitterMinutes, confirmHours, settings as nudgeSettings } from './followups.js';
+import { routeBucket } from './leadnorm.js';
 import { notifyManagers, adminLink } from './notify.js';
 import { aiProvider } from './ai.js';
 import { dominantLang } from './lang.js';
@@ -382,7 +383,15 @@ async function respond(convId, ch, text) {
       .run(out.follow_up_at, out.follow_up_note || '', conv.id);
   }
 
-  if (out.needs_human) flagHuman(conv.id, out.handoff_reason || 'ИИ передал диалог');
+  // Заявка не наша: бытовая уборка или человек ищет работу. Такие не должны
+  // висеть в очереди «нужен человек» — менеджеру там ловить нечего. Ответ
+  // клиенту всё равно уйдёт, а диалог сразу ложится в свою корзину архива.
+  const bucket = routeBucket(out.route);
+  if (bucket) {
+    db.prepare("UPDATE conversations SET status='closed', archive=?, needs_human=0, handoff_reason=NULL, nudge_stop=1, followup_at=NULL WHERE id=?")
+      .run(bucket, conv.id);
+    console.log(`[маршрут] диалог ${conv.id} → архив «${bucket}» (${out.route})`);
+  } else if (out.needs_human) flagHuman(conv.id, out.handoff_reason || 'ИИ передал диалог');
   else if (ready) flagHuman(conv.id, 'заявка готова — посмотреть видео и назвать цену');
 
   let replies = [...(out.replies ?? [])];
@@ -556,6 +565,17 @@ export async function runFollowUps() {
       if (nowHour < openHour + 1) continue;                 // в первый час дня не начинаем
 
       // 3. Напоминание по договорённости: «напишите после ремонта»
+      if (conv.followup_at && conv.followup_at <= today && conv.followup_who === 'manager') {
+        // менеджер просил напомнить себе — клиенту бот в этот день не пишет
+        const who = lead.name || conv.name || `+${conv.phone}`;
+        const ok = await notifyManagers(`🔔 Сегодня напомнить: ${who}`
+          + `${conv.followup_note ? `\n${conv.followup_note}` : ''}\n${adminLink(conv.id)}`);
+        if (ok) {
+          db.prepare('UPDATE conversations SET followup_at=NULL, followup_note=NULL WHERE id=?').run(conv.id);
+          changed = true;
+        }
+        continue;
+      }
       if (conv.followup_at && conv.followup_at <= today) {
         if (await sendInitiative(conv, 'followup', { note: conv.followup_note || '', outside: sinceIn > 24 })) {
           db.prepare('UPDATE conversations SET followup_at=NULL, followup_note=NULL, nudges=0 WHERE id=?').run(conv.id);

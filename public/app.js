@@ -100,7 +100,7 @@ const COLUMNS = [
 // «не сейчас» и настоящие отказы. С одной колонкой это невозможно разобрать.
 const ARCHIVE = [
   { k:'staff',   t:'Сотрудники',    c:'var(--s1)',     hint:'свои номера, не клиенты' },
-  { k:'later',   t:'На потом',      c:'var(--s4)',     hint:'лид живой, но не сейчас' },
+  { k:'later',   t:'Обычные уборки', c:'var(--s4)',    hint:'бытовая уборка, не после ремонта' },
   { k:'refused', t:'Отказ',         c:'var(--muted)',  hint:'не релевантно или клиент отказался' }
 ];
 const ALL_COLS = [...COLUMNS, ...ARCHIVE];
@@ -1023,6 +1023,23 @@ function leadHtml(c) {
       <a class="btn" href="tel:+${esc(c.phone)}">${ico('<path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1.9.4 1.8.7 2.7a2 2 0 0 1-.5 2.1L8 9.8a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.7.7a2 2 0 0 1 1.7 2z"/>')}Позвонить</a>
       <a class="btn" href="https://wa.me/${esc(c.phone)}" target="_blank" rel="noopener">${ico('<path d="M3 21l1.6-4.7A8.5 8.5 0 1 1 8 19.6z"/>')}WhatsApp</a>
     </div>
+    <div class="sect note top"><h4>Заметка менеджера<button class="btn ghost sm" data-a="note-add">+ запись</button></h4>
+      <textarea data-r="note" dir="auto" rows="4" placeholder="О чём договорились, что обещали, чем закончилось. Видна только вам">${esc(c.note || '')}</textarea></div>
+    <div class="sect note"><h4>Напомнить${c.followup_at ? ` <span class="ok-tag">${esc(c.followup_at)}</span>` : ''}</h4>
+      <div class="fu">
+        <input type="date" data-r="fu-date" value="${esc(c.followup_at || '')}">
+        <select data-r="fu-who">
+          <option value="" ${c.followup_who !== 'manager' ? 'selected' : ''}>бот напишет клиенту</option>
+          <option value="manager" ${c.followup_who === 'manager' ? 'selected' : ''}>напомнить мне</option>
+        </select>
+        <input type="text" data-r="fu-note" dir="auto" placeholder="о чём напомнить" value="${esc(c.followup_note || '')}">
+        <div class="fu-quick">
+          <button class="btn ghost sm" data-fu="1">завтра</button>
+          <button class="btn ghost sm" data-fu="7">через неделю</button>
+          <button class="btn ghost sm" data-fu="30">через месяц</button>
+          ${c.followup_at ? '<button class="btn ghost sm" data-fu="off">убрать</button>' : ''}
+        </div>
+      </div></div>
     <div class="kv"><dt>Колонка</dt><dd><select data-r="col">
       <optgroup label="В работе">${COLUMNS.map((x) =>
         `<option value="${x.k}" ${columnOf(c) === x.k ? 'selected' : ''}>${x.t}</option>`).join('')}</optgroup>
@@ -1053,8 +1070,6 @@ function leadHtml(c) {
     ${thumbs ? `<div class="sect"><h4>Фото от клиента (${photos.length})</h4><div class="thumbs">${thumbs}</div></div>` : ''}
     ${rooms ? `<div class="sect"><h4>Что видно на фото</h4>${rooms}</div>` : ''}
     ${c.summary ? `<div class="sect"><h4>Суть</h4><div class="quote" dir="auto">${esc(c.summary)}</div></div>` : ''}
-    <div class="sect note"><h4>Заметка менеджера</h4>
-      <textarea data-r="note" dir="auto" placeholder="Видна только вам, клиенту не уходит">${esc(c.note || '')}</textarea></div>
   </div>`;
 }
 
@@ -1066,6 +1081,38 @@ function bindLead(root, convId) {
     await api(`/api/conversations/${convId}/note`, { method: 'POST', body: JSON.stringify({ note: ta.value }) });
     toast('Заметка сохранена');
   };
+  // заметка — это история разговора, а не одна фраза: новая запись ложится сверху с датой
+  const addNote = root.querySelector('[data-a="note-add"]');
+  if (addNote) addNote.onclick = () => {
+    const d = new Date().toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' });
+    ta.value = `${d} — \n` + (ta.value ? ta.value : '');
+    ta.focus();
+    ta.setSelectionRange(d.length + 3, d.length + 3);
+  };
+
+  // напоминание: дата, кому и о чём. Пресеты — потому что «через неделю» руками считать глупо
+  const fuDate = root.querySelector('[data-r="fu-date"]');
+  const fuWho = root.querySelector('[data-r="fu-who"]');
+  const fuNote = root.querySelector('[data-r="fu-note"]');
+  const saveFu = async (date) => {
+    try {
+      await api(`/api/conversations/${convId}/lead`, { method: 'POST', body: JSON.stringify({
+        followup_at: date ?? fuDate.value, followup_note: fuNote.value, followup_who: fuWho.value }) });
+      toast(date === '' ? 'Напоминание убрано' : 'Напомним ' + (date ?? fuDate.value));
+      openConv(convId, drawerOpen);
+    } catch (e) { toast(e.message, true); }
+  };
+  if (fuDate) {
+    fuDate.onchange = () => saveFu();
+    fuWho.onchange = () => fuDate.value && saveFu();
+    fuNote.onblur = () => fuDate.value && saveFu();
+    $$('[data-fu]', root).forEach((b) => b.onclick = () => {
+      if (b.dataset.fu === 'off') return saveFu('');
+      const d = new Date();
+      d.setDate(d.getDate() + Number(b.dataset.fu));
+      saveFu(new Intl.DateTimeFormat('sv-SE').format(d));
+    });
+  }
   $$('img', root).forEach((i) => i.onclick = () => window.open(i.src, '_blank'));
 
   const edit = root.querySelector('[data-a="lead-edit"]');

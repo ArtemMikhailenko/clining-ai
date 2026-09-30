@@ -337,6 +337,10 @@ app.post('/api/conversations/:id/lead', (req, res) => {
   }
   // Напоминание можно поправить руками: клиент позвонил и перенёс сроки,
   // а бот об этом не знает — в переписке этого не было.
+  if ('followup_who' in req.body) {
+    const w = String(req.body.followup_who ?? '').trim();
+    db.prepare('UPDATE conversations SET followup_who=? WHERE id=?').run(w === 'manager' ? 'manager' : null, id);
+  }
   if ('followup_at' in req.body || 'followup_note' in req.body) {
     const at = String(req.body.followup_at ?? conv.followup_at ?? '').trim();
     if (at && !/^\d{4}-\d{2}-\d{2}$/.test(at)) {

@@ -599,6 +599,14 @@ tbody tr:last-child td{border-bottom:0}
   border:1px solid color-mix(in srgb,var(--warn) 30%,transparent);color:var(--warn);font-size:13px}
 .composer{flex:none;padding:11px 15px 13px;background:var(--surface);border-top:var(--hair) solid var(--border);position:relative}
 /* выбор корзины архива под кнопкой «Закрыть» */
+/* заметка-история и напоминание — верх карточки, до данных заявки */
+.sect.note h4{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.sect.note.top textarea{min-height:82px}
+.fu{display:flex;flex-direction:column;gap:6px}
+.fu input,.fu select{background:var(--surface-2);border:var(--hair) solid var(--border);border-radius:var(--r-sm);
+  padding:6px 8px;font:inherit;font-size:13px;color:var(--text);width:100%}
+.fu input:focus,.fu select:focus{border-color:var(--accent);box-shadow:var(--ring);outline:none}
+.fu-quick{display:flex;gap:6px;flex-wrap:wrap}
 .pickmenu{position:absolute;right:0;top:calc(100% + 6px);z-index:30;min-width:230px;padding:6px;
   background:var(--surface);border:var(--hair) solid var(--border);border-radius:var(--r-md);
   box-shadow:0 12px 28px -12px rgba(16,16,24,.3)}
