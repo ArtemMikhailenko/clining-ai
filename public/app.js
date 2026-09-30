@@ -57,6 +57,14 @@ function toast(text, err = false) {
   setTimeout(() => el.remove(), 3200);
 }
 
+/**
+ * Уведомления в браузере есть не везде: в Safari на iPhone глобального
+ * Notification просто нет, и `Notification?.permission` не спасает — это
+ * ReferenceError, который валил всю страницу настроек.
+ */
+const hasNotifications = () => typeof Notification !== 'undefined';
+const notifyReady = () => hasNotifications() && Notification.permission === 'granted';
+
 const api = async (url, opts) => {
   const r = await fetch(url, { headers: { 'Content-Type': 'application/json' }, ...opts });
   if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
@@ -1314,7 +1322,8 @@ function renderSettings() {
         srow('Чёрный список', 'Номера, которым бот не отвечает и которые не попадают в заявки: личные контакты, сотрудники, спам. По одному на строку или через запятую, в любом формате — «050-123-4567» или «+972 50 123 4567». Всем остальным бот отвечает.',
           `<textarea id="f-blocked" class="mono" rows="4" placeholder="+972 50 123 4567">${esc(s.blocked_numbers || '')}</textarea>`)
         + srow('Уведомления в браузере', 'Всплывающее уведомление, когда бот передаёт диалог человеку.',
-          `<button class="btn" id="f-notify">${Notification?.permission === 'granted' ? 'Уведомления включены' : 'Включить уведомления'}</button>`))
+          `<button class="btn" id="f-notify">${notifyReady() ? 'Уведомления включены'
+            : hasNotifications() ? 'Включить уведомления' : 'Браузер не поддерживает'}</button>`))
       + grp('Уведомления менеджеру в WhatsApp', 'Когда бот передаёт заявку человеку, на эти номера придёт сообщение: кто написал, что за объект, причина передачи и ссылка на диалог. Шлёт тот же номер, на котором работает бот.',
         srow('Номера менеджеров', 'По одному на строку и обязательно с кодом страны: «+972 50 123 4567». Без кода страны сообщение не дойдёт. Пусто — не слать.',
           `<textarea id="f-managers" class="mono" rows="3" placeholder="+972 50 123 4567">${esc(s.manager_numbers || '')}</textarea>`)
@@ -1388,6 +1397,7 @@ function renderSettings() {
     setDirty(true);
   });
   $('#f-notify') && ($('#f-notify').onclick = async () => {
+    if (!hasNotifications()) return;
     const p = await Notification.requestPermission();
     $('#f-notify').textContent = p === 'granted' ? 'Уведомления включены' : 'Браузер отказал';
   });
@@ -1537,7 +1547,7 @@ async function loadList() {
   for (const c of convs) {
     if (c.needs_human && !prev.get(c.id) && !notified.has(c.id)) {
       notified.add(c.id);
-      if (Notification?.permission === 'granted') {
+      if (notifyReady()) {
         new Notification('Нужен менеджер', { body: `${c.name || '+' + c.phone}: ${c.handoff_reason || ''}`, tag: 'conv' + c.id });
       }
     }
