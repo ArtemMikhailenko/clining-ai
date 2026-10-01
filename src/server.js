@@ -14,6 +14,8 @@ import { quote, priceList } from './pricing.js';
 import { waStatus, onStatus, requestPairing, logout as waLogout, restart as waRestart } from './channels/baileys.js';
 import { sttLabel } from './stt.js';
 import { notifyManagers, adminLink, localTime } from './notify.js';
+import { annotate, setNext, controlDay, startControl } from './control.js';
+import { localDate } from './schedule.js';
 import { listManagers, saveManager, deleteManager, getManager, setManager, assignHandoff, clearCallDue,
   listCalls, logCall, saveRecording, sweepRecordings, overdueCalls, CALL_STATUS } from './calls.js';
 import { aiConfigured, aiLabel } from './ai.js';
@@ -105,6 +107,9 @@ app.get('/api/state', (req, res) => {
     call_sla_min: Number(getSetting('call_sla_min')) || 5,
     rec_max_mb: Number(getSetting('rec_max_mb')) || 50,
     rec_keep_days: Number(getSetting('rec_keep_days')) || 0,
+    offer_wait_hours: Number(getSetting('offer_wait_hours')) || 48,
+    media_wait_hours: Number(getSetting('media_wait_hours')) || 24,
+    evening_report: getSetting('evening_report') === '1',
     managers: listManagers(),
     call_status: CALL_STATUS,
     ai_effort: getSetting('ai_effort') || process.env.AI_EFFORT || 'low',
@@ -148,7 +153,9 @@ app.post('/api/state', (req, res) => {
   if ('admin_url' in req.body) setSetting('admin_url', String(req.body.admin_url).trim());
   if ('source_map' in req.body) setSetting('source_map', String(req.body.source_map));
   if ('media_required' in req.body) setSetting('media_required', String(req.body.media_required));
-  for (const [k, lo, hi] of [['call_sla_min', 1, 240], ['rec_max_mb', 1, 200], ['rec_keep_days', 0, 3650]]) {
+  if ('evening_report' in req.body) setSetting('evening_report', req.body.evening_report ? '1' : '0');
+  for (const [k, lo, hi] of [['call_sla_min', 1, 240], ['rec_max_mb', 1, 200], ['rec_keep_days', 0, 3650],
+    ['offer_wait_hours', 1, 720], ['media_wait_hours', 1, 720]]) {
     if (k in req.body) setSetting(k, String(Math.min(hi, Math.max(lo, Math.round(Number(req.body[k]) || 0)))));
   }
   if ('ai_effort' in req.body) {
@@ -185,7 +192,7 @@ app.post('/api/state', (req, res) => {
   res.json({ ok: true });
 });
 
-app.get('/api/conversations', (req, res) => res.json(listConversations()));
+app.get('/api/conversations', (req, res) => res.json(annotate(listConversations())));
 
 /** Сводка по заявкам за период. Всё считается из тех же диалогов, без отдельной аналитики. */
 app.get('/api/stats', (req, res) => {
@@ -296,7 +303,10 @@ app.get('/api/stats', (req, res) => {
 app.get('/api/conversations/:id', (req, res) => {
   const conv = getConversation(Number(req.params.id));
   if (!conv) return res.sendStatus(404);
-  res.json({ ...conv, wait_media: waitsMedia(conv), messages: history(conv.id, 200), quote: quote(JSON.parse(conv.lead || '{}')) });
+  conv.last_in_at = db.prepare("SELECT max(created_at) t FROM messages WHERE conv_id=? AND direction='in'").get(conv.id).t;
+  conv.wait_media = waitsMedia(conv);
+  annotate([conv]);
+  res.json({ ...conv, messages: history(conv.id, 200), quote: quote(JSON.parse(conv.lead || '{}')) });
 });
 
 /** Черновик ответа для менеджера: показать, но не отправлять. */
@@ -597,6 +607,20 @@ app.post('/api/conversations/:id/manager', (req, res) => {
   res.json(getConversation(id));
 });
 
+app.post('/api/conversations/:id/next', (req, res) => {
+  const id = Number(req.params.id);
+  try { setNext(id, req.body || {}); }
+  catch (e) { return res.status(400).json({ error: e.message }); }
+  emit('conversations', null);
+  res.json(getConversation(id));
+});
+
+/** «Контроль дня» (ТЗ §8): по дате в часовом поясе компании. */
+app.get('/api/control', (req, res) => {
+  const d = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.date || '')) ? String(req.query.date) : localDate();
+  res.json(controlDay(d));
+});
+
 app.get('/api/conversations/:id/calls', (req, res) => res.json(listCalls(Number(req.params.id))));
 app.post('/api/conversations/:id/calls', (req, res) => {
   const id = Number(req.params.id);
@@ -759,6 +783,7 @@ setInterval(async () => {
   }
 }, 6e4).unref?.();
 setInterval(sweepRecordings, 36e5).unref?.();
+startControl();
 
 app.listen(PORT, async () => {
   console.log(`\n  Админка:    http://localhost:${PORT}`);

@@ -584,6 +584,11 @@ export async function runFollowUps() {
               + `\nПодтвердите с клиентом: ${adminLink(conv.id)}`, { convId: conv.id })
             : await sendInitiative(conv, 'confirm', { when, date: conv.job_date, time: conv.job_time || '', outside: sinceIn > 24 });
           if (ok) { mark(); changed = true; if (!byManager) sent++; }
+          // §7: о завтрашнем выезде знает и ответственный, даже когда клиенту напомнил бот
+          if (ok && !byManager && when === 'eve') {
+            notifyManagers(`📅 Завтра уборка: ${who}${lead.district ? `, ${lead.district}` : ''}${conv.job_time ? `, ${conv.job_time}` : ''}`
+              + `\nКлиенту бот напомнил. ${adminLink(conv.id)}`, { convId: conv.id }).catch(() => {});
+          }
           continue;
         }
       }

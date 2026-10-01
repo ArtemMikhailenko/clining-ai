@@ -6,6 +6,10 @@
 import { db, getSetting } from './db.js';
 import { channel } from './channels/index.js';
 import { recipients, getManager } from './calls.js';
+
+// отчёты — только владельцу: менеджерам хватает уведомлений по своим заявкам
+const ownerPhones = () => db.prepare("SELECT phone FROM managers WHERE role='owner' AND phone IS NOT NULL AND phone != ''")
+  .all().map((m) => m.phone);
 import { scheduleSetting } from './schedule.js';
 
 const LABELS = { service: 'Уборка', object_type: 'Объект', area_m2: 'Площадь', district: 'Где',
@@ -55,9 +59,9 @@ export function handoffText(conv, reason) {
  * Написать менеджерам. С convId — ответственному по заявке (если он есть),
  * owners — ещё и владельцу: так уходят эскалации.
  */
-export async function notifyManagers(text, { convId = null, owners = false } = {}) {
+export async function notifyManagers(text, { convId = null, owners = false, managerId = null, ownersOnly = false } = {}) {
   if (getSetting('notify_on') !== '1') return false;
-  const to = recipients(convId, { owners });
+  const to = ownersOnly ? ownerPhones() : recipients(convId, { owners, managerId });
   if (!to.length) return false;
   for (const phone of to) {
     try { await channel.send({ phone, chat_id: null, channel: channel.name }, text); }

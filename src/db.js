@@ -133,7 +133,21 @@ if (!cols.includes('manager_id')) {
   db.exec('ALTER TABLE conversations ADD COLUMN assigned_at TEXT');
   db.exec('ALTER TABLE conversations ADD COLUMN call_due_at TEXT');       // пусто — звонить не нужно
   db.exec('ALTER TABLE conversations ADD COLUMN call_escalated_at TEXT'); // просрочку уже разослали
+  db.exec('ALTER TABLE conversations ADD COLUMN handoff_due_at TEXT');    // первый срок: для SLA в «Контроле дня»
 }
+// Следующее действие менеджера (ТЗ §4.1): что, кто, к какому сроку
+if (!cols.includes('next_action')) {
+  db.exec('ALTER TABLE conversations ADD COLUMN next_action TEXT');
+  db.exec('ALTER TABLE conversations ADD COLUMN next_action_at TEXT');
+  db.exec('ALTER TABLE conversations ADD COLUMN next_action_mgr INTEGER');
+  db.exec('ALTER TABLE conversations ADD COLUMN next_action_notified_at TEXT');
+  // «напомнить мне» из старого блока — это и есть действие менеджера; 06:00 UTC ≈ 9 утра в Израиле
+  const moved = db.prepare(`UPDATE conversations SET next_action=COALESCE(NULLIF(followup_note,''), 'напомнить'),
+      next_action_at=followup_at || ' 06:00:00', followup_at=NULL, followup_note=NULL, followup_who=NULL
+    WHERE followup_who='manager' AND followup_at IS NOT NULL`).run().changes;
+  if (moved) console.log(`Следующее действие: перенесено ${moved} напоминаний менеджеру`);
+}
+if (!cols.includes('stage_at')) db.exec('ALTER TABLE conversations ADD COLUMN stage_at TEXT');   // когда сменился этап
 
 const needStages = !cols.includes('stage');
 if (needStages) {
@@ -329,6 +343,10 @@ seed.run('call_sla_min', '5');
 // записи разговоров: предел размера файла и срок хранения (0 — хранить всегда)
 seed.run('rec_max_mb', '50');
 seed.run('rec_keep_days', '0');
+// §7: через сколько часов тишины поднимать флаг; вечерний отчёт владельцу
+seed.run('offer_wait_hours', '48');
+seed.run('media_wait_hours', '24');
+seed.run('evening_report', '1');
 // ТЗ §2.1: для каких видов уборки фото/видео обязательны. Без них заявка
 // остаётся в «Уточнении» с флагом «Ждём фото/видео»
 seed.run('media_required', 'после ремонта, перед въездом, после выезда, генеральная');
@@ -521,6 +539,7 @@ export function applyStage(convId, next, { close = null, lostReason = null, acto
   }
   const set = {
     stage: next,
+    stage_at: new Date().toISOString().slice(0, 19).replace('T', ' '),
     close_reason: next === 'closed' ? close : null,
     lost_reason: next === 'closed' && close === 'lost' ? String(lostReason).trim() : null,
     archive: next === 'closed' ? ARCHIVE_OF[close] : null

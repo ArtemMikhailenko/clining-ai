@@ -69,6 +69,15 @@ function localParts(at) {
   }
 }
 
+/** Дата «сегодня» (или для момента at) в часовом поясе компании: ГГГГ-ММ-ДД. */
+export function localDate(at = new Date()) {
+  try { return new Intl.DateTimeFormat('sv-SE', { timeZone: scheduleSetting('timezone') }).format(at); }
+  catch { return at.toISOString().slice(0, 10); }
+}
+
+/** Минуты от полуночи и день недели в часовом поясе компании. */
+export const localClock = (at = new Date()) => localParts(at);
+
 export function isHoliday(dateIso) {
   return holidays().find((h) => h.date === dateIso) || null;
 }

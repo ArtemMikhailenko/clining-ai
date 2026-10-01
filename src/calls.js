@@ -64,9 +64,9 @@ export function pickManager() {
 }
 
 /** Номера для рассылки: ответственный, а если его нет — все, кто принимает заявки. */
-export function recipients(convId, { owners = false } = {}) {
+export function recipients(convId, { owners = false, managerId = null } = {}) {
   const conv = convId ? db.prepare('SELECT manager_id FROM conversations WHERE id=?').get(convId) : null;
-  const mine = getManager(conv?.manager_id);
+  const mine = getManager(managerId || conv?.manager_id);
   const base = mine?.phone ? [mine] : db.prepare("SELECT * FROM managers WHERE active=1 AND phone IS NOT NULL AND phone != ''").all();
   const extra = owners ? db.prepare("SELECT * FROM managers WHERE role='owner' AND phone IS NOT NULL AND phone != ''").all() : [];
   return [...new Set([...base, ...extra].map((m) => m.phone).filter(Boolean))];
@@ -91,8 +91,8 @@ export function assignHandoff(convId, { actor = 'система', why = '' } = {
   const keep = getManager(conv.manager_id);
   const m = keep || pickManager();
   const due = sqlTime(callDue());
-  db.prepare(`UPDATE conversations SET manager_id=?, assigned_at=datetime('now'), call_due_at=?,
-    call_escalated_at=NULL WHERE id=?`).run(m?.id ?? null, due, convId);
+  db.prepare(`UPDATE conversations SET manager_id=?, assigned_at=datetime('now'), call_due_at=?, handoff_due_at=?,
+    call_escalated_at=NULL WHERE id=?`).run(m?.id ?? null, due, due, convId);
   if (!keep && m) audit('lead', convId, 'manager_id', null, m.name, actor, why || 'передача менеджеру');
   audit('lead', convId, 'call_due_at', null, due, actor, why || 'передача менеджеру');
   return m;
@@ -137,6 +137,8 @@ export function logCall(convId, b, actor = 'менеджер') {
   if (recording && !fs.existsSync(path.join(REC_DIR, recording))) throw new Error('Запись не загрузилась — прикрепите ещё раз');
   const noRec = String(b.no_record_reason || '').trim();
   if (status === 'answered' && !recording && !noRec) throw new Error('Разговор состоялся: прикрепите запись или напишите, почему её нет');
+  // §6.2: после разговора нужен итог — иначе непонятно, что делать дальше
+  if (status === 'answered' && !String(b.outcome || '').trim()) throw new Error('Напишите, о чём договорились');
 
   const duration = Math.max(0, Math.round(Number(b.duration_min || 0) * 60)) || null;
   const managerId = Number(b.manager_id) || conv.manager_id || null;

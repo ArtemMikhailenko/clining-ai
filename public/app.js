@@ -145,6 +145,7 @@ const matches = (c) => {
   if (flagFilter === 'need' && !(c.needs_human && c.status !== 'closed')) return false;
   if (flagFilter === 'review' && !c.review) return false;
   if ((flagFilter === 'call' || flagFilter === 'late') && callState(c) !== flagFilter) return false;
+  if (flagFilter === 'red' && !(c.stage !== 'closed' && (c.warn || []).some((w) => w.level === 'red'))) return false;
   const q = query.trim().toLowerCase();
   if (!q) return true;
   return (c.name || '').toLowerCase().includes(q) || String(c.phone).includes(q)
@@ -178,6 +179,8 @@ function chipFor(c) {
   const cs = callState(c);
   if (cs === 'late') chips.push(`<span class="chip late" title="срок был ${dayTime(c.call_due_at)}">звонок просрочен ${lateBy(c.call_due_at)}</span>`);
   if (cs === 'call') chips.push(`<span class="chip call">позвонить до ${dayTime(c.call_due_at)}</span>`);
+  const red = (c.warn || []).find((w) => w.level === 'red' && w.code !== 'late');
+  if (red) chips.push(`<span class="chip late">${esc(red.text)}</span>`);
   if (c.wait_media) chips.push('<span class="chip wait">ждём фото/видео</span>');
   if (c.stage === 'done' && !c.paid_sum) chips.push('<span class="chip wait">ожидается оплата</span>');
   if (c.review) chips.push(`<span class="chip review" title="${esc(c.review)}">проверить</span>`);
@@ -192,6 +195,7 @@ const PAGES = {
               render: () => (leadView === 'list' ? renderLeads() : renderBoard()),
               tools: leadsTools },
   cal:      { title: 'Расписание', tpl: 'tpl-cal',  render: renderCal,   tools: calTools },
+  control:  { title: 'Контроль дня', tpl: null,     render: renderControl, tools: controlTools },
   settings: { title: 'Настройки', tpl: null,        render: renderSettings, tools: () => '' }
 };
 
@@ -668,7 +672,7 @@ function cardHtml(c) {
 
 function subLine(n) {
   const el = $('#pg-sub');
-  const flagT = { need: 'нужен менеджер', review: 'проверить после переноса', call: 'позвонить', late: 'звонок просрочен' }[flagFilter];
+  const flagT = { need: 'нужен менеджер', review: 'проверить после переноса', call: 'позвонить', late: 'звонок просрочен', red: 'красные флаги' }[flagFilter];
   el.innerHTML = `${n} ${plural(n, 'заявка', 'заявки', 'заявок')}`
     + (stageFilter ? ` · ${esc(colTitle(stageFilter))}` : '')
     + (flagT ? ` · ${flagT}` : '')
@@ -727,6 +731,7 @@ function renderFunnel() {
   const needN = convs.filter((c) => c.needs_human && c.status !== 'closed').length;
   const reviewN = convs.filter((c) => c.review).length;
   const lateN = convs.filter((c) => callState(c) === 'late').length;
+  const redN = convs.filter((c) => c.stage !== 'closed' && (c.warn || []).some((w) => w.level === 'red')).length;
   const callN = convs.filter((c) => callState(c) === 'call').length;
   const wip = Number(state.wip_need) || 0;
   const flagRow = (k, t, n, c, alert, tone = '') => `<a class="frow flag ${tone} ${flagFilter === k ? 'on' : ''} ${n ? '' : 'zero'} ${alert ? 'alert' : ''}"
@@ -735,6 +740,7 @@ function renderFunnel() {
   box.innerHTML = `<div class="fbar">${bar}</div>`
   + flagRow('late', 'Звонок просрочен', lateN, 'var(--danger)', lateN > 0, 'danger')
   + flagRow('call', 'Позвонить', callN, 'var(--s1)', false)
+  + flagRow('red', 'Красные флаги', redN, 'var(--danger)', false)
   + flagRow('need', 'Нужен менеджер', needN, 'var(--warn)', needN > 0)
   + (reviewN ? flagRow('review', 'Проверить после переноса', reviewN, 'var(--s5)', false) : '')
   + '<div class="fsep"></div>'
@@ -1082,6 +1088,88 @@ function isCold(c) {
     && (Date.now() - dt(c.last_at)) > 864e5;
 }
 
+/** Следующее действие (ТЗ §4.1): что, кто, срок. Одно на карточку — новое заменяет старое. */
+const NEXT_PRESETS = ['Позвонить', 'Отправить предложение', 'Подтвердить дату', 'Получить оплату', 'Проверить фото/видео', 'Написать клиенту'];
+function nextHtml(c) {
+  if (c.stage === 'closed') return '';
+  const ms = state.managers || [];
+  // звонок по сроку идёт первым, но заданное менеджером действие тоже видно
+  const items = [];
+  if (c.call_due_at) items.push({ kind: 'call', what: 'позвонить', at: c.call_due_at, who: mgrName(c.manager_id) });
+  if (c.next_action) items.push({ kind: 'task', what: c.next_action, at: c.next_action_at, who: mgrName(c.next_action_mgr || c.manager_id) });
+  else if (c.followup_at) items.push({ kind: 'bot', what: c.followup_note || 'бот напишет клиенту', at: c.followup_at, who: 'бот' });
+  if (!items.length && c.next) items.push(c.next);
+  const botSet = !c.next_action && c.followup_at;
+  const whoSel = c.next_action_mgr || c.manager_id;
+  const cur = (n) => {
+    const when = !n.at ? '' : n.kind === 'task' || n.kind === 'call' ? dayTime(n.at) : esc(n.at);
+    const late = (n.kind === 'task' || n.kind === 'call') && n.at && dt(n.at) <= Date.now();
+    const own = n.kind === 'task' || (n.kind === 'bot' && c.followup_at);
+    return `<div class="na-cur ${late ? 'late' : ''} ${n.kind}"><div><b dir="auto">${esc(n.what)}</b>
+        <span>${[when, n.who].filter(Boolean).join(' · ')}${late ? ' · просрочено' : ''}${n.kind === 'call' ? ' · закроется, когда запишете звонок' : ''}</span></div>
+        ${own ? `<div class="na-acts"><button class="btn sm" data-a="next-done">Сделано</button>
+          <button class="btn ghost sm" data-a="next-clear" title="Убрать">✕</button></div>` : ''}</div>`;
+  };
+  return `<div class="sect note nextbox"><h4>Следующее действие</h4>
+    ${items.length ? items.map(cur).join('')
+      : '<div class="na-cur none">Не задано. У каждой заявки в работе должно быть следующее действие.</div>'}
+    <form class="na-form" data-r="nextf">
+      <input type="text" name="what" list="next-presets" dir="auto" placeholder="что сделать" value="${esc(c.next_action || '')}">
+      <datalist id="next-presets">${NEXT_PRESETS.map((t) => `<option value="${t}">`).join('')}</datalist>
+      <div class="na-row">
+        <select name="who">${ms.map((m) => `<option value="${m.id}" ${!botSet && whoSel === m.id ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}
+          ${!ms.length ? '<option value="">менеджер</option>' : ''}
+          <option value="bot" ${botSet ? 'selected' : ''}>бот напишет клиенту</option></select>
+        <input type="date" name="date"><input type="time" name="time" value="10:00">
+      </div>
+      <div class="fu-quick">
+        <button type="button" class="btn ghost sm" data-nq="0">сегодня</button>
+        <button type="button" class="btn ghost sm" data-nq="1">завтра</button>
+        <button type="button" class="btn ghost sm" data-nq="7">через неделю</button>
+        <button type="button" class="btn ghost sm" data-nq="30">через месяц</button>
+        <button type="submit" class="btn primary sm">Сохранить</button>
+      </div>
+    </form></div>`;
+}
+
+function bindNext(root, convId) {
+  const f = root.querySelector('[data-r="nextf"]');
+  const post = async (body, msg) => {
+    try {
+      await api(`/api/conversations/${convId}/next`, { method: 'POST', body: JSON.stringify(body) });
+      toast(msg);
+      loadList();
+      openConv(convId, drawerOpen);
+    } catch (e) { toast(e.message, true); }
+  };
+  const done = root.querySelector('[data-a="next-done"]');
+  if (done) done.onclick = () => post({ done: true }, 'Отмечено. Задайте следующее действие');
+  const clr = root.querySelector('[data-a="next-clear"]');
+  if (clr) clr.onclick = () => post({ clear: true }, 'Действие убрано');
+  if (!f) return;
+  const iso = (d) => new Intl.DateTimeFormat('sv-SE').format(d);
+  const sync = () => { f.time.hidden = f.who.value === 'bot'; };
+  f.who.onchange = sync; sync();
+  $$('[data-nq]', f).forEach((b) => b.onclick = () => {
+    const d = new Date(); d.setDate(d.getDate() + Number(b.dataset.nq));
+    f.date.value = iso(d);
+  });
+  f.onsubmit = (e) => {
+    e.preventDefault();
+    if (!f.date.value) return toast('Выберите дату', true);
+    const bot = f.who.value === 'bot';
+    const at = bot ? f.date.value : new Date(`${f.date.value}T${f.time.value || '10:00'}`).toISOString();
+    post({ who: bot ? 'bot' : f.who.value, what: f.what.value, at },
+      bot ? 'Бот напишет клиенту ' + f.date.value : 'Действие сохранено');
+  };
+}
+
+/** Предупреждения карточки (ТЗ §7, §8.3): что нарушено и что посмотреть. */
+function warnHtml(c) {
+  const list = (c.warn || []).filter((w) => w.code !== 'late');
+  return list.length ? `<div class="warns">${list.map((w) => `<span class="warn-i ${w.level}">${esc(w.text)}</span>`).join('')}</div>` : '';
+}
+
 /** Ответственный и звонки (ТЗ §4.1, §6): первый экран карточки, а не вкладка. */
 function callHtml(c) {
   const cs = callState(c);
@@ -1089,7 +1177,7 @@ function callHtml(c) {
   const st = state.call_status || {};
   const local = (d) => new Date(d.getTime() - d.getTimezoneOffset() * 6e4).toISOString().slice(0, 16);
   const tomorrow = new Date(); tomorrow.setDate(tomorrow.getDate() + 1); tomorrow.setHours(10, 0, 0, 0);
-  return `<div class="callbox ${cs || ''}">
+  return `${warnHtml(c)}<div class="callbox ${cs || ''}">
     <div class="kv"><dt>Ответственный</dt><dd><select data-r="mgr"><option value="">не назначен</option>${ms.map((m) =>
       `<option value="${m.id}" ${c.manager_id === m.id ? 'selected' : ''}>${esc(m.name)}${m.active ? '' : ' (не принимает)'}</option>`).join('')}
       ${c.manager_id && !ms.some((m) => m.id === c.manager_id) ? '<option selected>удалён</option>' : ''}</select></dd></div>
@@ -1217,21 +1305,7 @@ function leadHtml(c) {
     </div>
     <div class="sect note top"><h4>Заметка менеджера<button class="btn ghost sm" data-a="note-add">+ запись</button></h4>
       <textarea data-r="note" dir="auto" rows="4" placeholder="О чём договорились, что обещали, чем закончилось. Видна только вам">${esc(c.note || '')}</textarea></div>
-    <div class="sect note"><h4>Напомнить${c.followup_at ? ` <span class="ok-tag">${esc(c.followup_at)}</span>` : ''}</h4>
-      <div class="fu">
-        <input type="date" data-r="fu-date" value="${esc(c.followup_at || '')}">
-        <select data-r="fu-who">
-          <option value="" ${c.followup_who !== 'manager' ? 'selected' : ''}>бот напишет клиенту</option>
-          <option value="manager" ${c.followup_who === 'manager' ? 'selected' : ''}>напомнить мне</option>
-        </select>
-        <input type="text" data-r="fu-note" dir="auto" placeholder="о чём напомнить" value="${esc(c.followup_note || '')}">
-        <div class="fu-quick">
-          <button class="btn ghost sm" data-fu="1">завтра</button>
-          <button class="btn ghost sm" data-fu="7">через неделю</button>
-          <button class="btn ghost sm" data-fu="30">через месяц</button>
-          ${c.followup_at ? '<button class="btn ghost sm" data-fu="off">убрать</button>' : ''}
-        </div>
-      </div></div>
+    ${nextHtml(c)}
     ${c.review ? `<div class="review-note"><b>Проверить после переноса:</b> ${esc(c.review)}
       <button class="btn sm" data-a="reviewed">Проверено</button></div>` : ''}
     <div class="kv"><dt>Этап</dt><dd><select data-r="col">
@@ -1252,7 +1326,6 @@ function leadHtml(c) {
     ${c.source ? `<div class="kv"><dt>Источник</dt><dd dir="auto">${c.source_url
       ? `<a href="${esc(c.source_url)}" target="_blank" rel="noopener">${esc(c.source)}</a>` : esc(c.source)}${
       c.source_title ? ` · ${esc(c.source_title)}` : ''}</dd></div>` : ''}
-    ${c.followup_at ? `<div class="kv"><dt>Напомнить</dt><dd>${esc(c.followup_at)}${c.followup_note ? ' · ' + esc(c.followup_note) : ''}</dd></div>` : ''}
     ${c.nudges ? `<div class="kv"><dt>Напоминаний</dt><dd>${c.nudges}</dd></div>` : ''}
     ${c.wait_media ? `<div class="kv gap"><dt>Фото/видео</dt><dd>нужны для этого вида уборки — ещё не получены</dd></div>` : ''}
     ${gapsHtml(c)}
@@ -1321,29 +1394,7 @@ function bindLead(root, convId) {
     ta.setSelectionRange(d.length + 3, d.length + 3);
   };
 
-  // напоминание: дата, кому и о чём. Пресеты — потому что «через неделю» руками считать глупо
-  const fuDate = root.querySelector('[data-r="fu-date"]');
-  const fuWho = root.querySelector('[data-r="fu-who"]');
-  const fuNote = root.querySelector('[data-r="fu-note"]');
-  const saveFu = async (date) => {
-    try {
-      await api(`/api/conversations/${convId}/lead`, { method: 'POST', body: JSON.stringify({
-        followup_at: date ?? fuDate.value, followup_note: fuNote.value, followup_who: fuWho.value }) });
-      toast(date === '' ? 'Напоминание убрано' : 'Напомним ' + (date ?? fuDate.value));
-      openConv(convId, drawerOpen);
-    } catch (e) { toast(e.message, true); }
-  };
-  if (fuDate) {
-    fuDate.onchange = () => saveFu();
-    fuWho.onchange = () => fuDate.value && saveFu();
-    fuNote.onblur = () => fuDate.value && saveFu();
-    $$('[data-fu]', root).forEach((b) => b.onclick = () => {
-      if (b.dataset.fu === 'off') return saveFu('');
-      const d = new Date();
-      d.setDate(d.getDate() + Number(b.dataset.fu));
-      saveFu(new Intl.DateTimeFormat('sv-SE').format(d));
-    });
-  }
+  bindNext(root, convId);
   $$('img', root).forEach((i) => i.onclick = () => window.open(i.src, '_blank'));
 
   const edit = root.querySelector('[data-a="lead-edit"]');
@@ -1410,6 +1461,106 @@ function closeDrawer() {
   drawerOpen = false;
   showLead(false);
   $('#drawer').classList.remove('on'); $('#scrim').classList.remove('on');
+}
+
+/* ───── контроль дня (ТЗ §8) ───── */
+let ctrlDate = null;          // null — сегодня по часам компании
+let ctrl = null;
+let ctrlTab = 'handed';       // handed | flagged
+
+function controlTools() {
+  const chev = (d) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="${d}"/></svg>`;
+  return `<div class="seg">
+    <button id="ctl-prev" title="Предыдущий день">${chev('m15 18-6-6 6-6')}</button>
+    <button id="ctl-today" class="${ctrlDate ? '' : 'on'}">Сегодня</button>
+    <button id="ctl-next" title="Следующий день">${chev('m9 18 6-6-6-6')}</button></div>
+    <input type="date" id="ctl-date" class="ctl-date" value="${ctrlDate || ''}">`;
+}
+
+function bindControlTools() {
+  const shift = (n) => {
+    const base = ctrlDate || ctrl?.date || new Intl.DateTimeFormat('sv-SE').format(new Date());
+    const d = new Date(base + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() + n);
+    ctrlDate = d.toISOString().slice(0, 10);
+    go('control');
+  };
+  $('#ctl-prev') && ($('#ctl-prev').onclick = () => shift(-1));
+  $('#ctl-next') && ($('#ctl-next').onclick = () => shift(1));
+  $('#ctl-today') && ($('#ctl-today').onclick = () => { ctrlDate = null; go('control'); });
+  $('#ctl-date') && ($('#ctl-date').onchange = (e) => { ctrlDate = e.target.value || null; go('control'); });
+}
+
+async function renderControl() {
+  const el = $('#content');
+  if (!$('#ctl')) el.innerHTML = '<div class="ctl" id="ctl"><div class="empty">загружаем…</div></div>';
+  bindControlTools();
+  try { ctrl = await api('/api/control' + (ctrlDate ? '?date=' + ctrlDate : '')); }
+  catch (e) { $('#ctl').innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  if (page !== 'control') return;
+  const d = ctrl, k = d.kpi;
+  if (!ctrlDate && $('#ctl-date')) $('#ctl-date').value = d.date;
+  const day = new Date(d.date + 'T12:00:00Z').toLocaleDateString('ru-RU', { weekday: 'long', day: 'numeric', month: 'long' });
+  $('#pg-sub').textContent = day;
+
+  const tile = (t, parts, tone = '') => `<div class="ctl-k ${tone}"><span>${t}</span><b>${parts}</b></div>`;
+  const sep = '<i>/</i>';
+  const status = !k.handed
+    ? `<div class="ctl-status idle">За этот день менеджерам ничего не передавали.</div>`
+    : d.closed
+      ? `<div class="ctl-status ok"><b>День закрыт.</b> Каждой переданной заявке звонили, у разговоров есть записи или причины, у заявок в работе есть следующее действие.</div>`
+      : `<div class="ctl-status bad"><b>День не закрыт: ${d.exceptions.length} ${plural(d.exceptions.length, 'исключение', 'исключения', 'исключений')}.</b>
+          <ul>${d.exceptions.map((x) => `<li><a data-open="${x.id}">${esc(x.who)}</a> — ${esc(x.text)}</li>`).join('')}</ul></div>`;
+
+  const rows = ctrlTab === 'handed' ? d.rows : d.flagged;
+  $('#ctl').innerHTML = `${status}
+    <div class="ctl-kpis">
+      ${tile('Передано менеджерам', k.handed)}
+      ${tile('Обзвонено / не обзвонено / с просрочкой', `${k.called}${sep}<em class="${k.not_called ? 'bad' : ''}">${k.not_called}</em>${sep}<em class="${k.late ? 'bad' : ''}">${k.late}</em>`)}
+      ${tile('Ответили / нет ответа / повторный звонок', `${k.answered}${sep}${k.no_answer}${sep}${k.repeat}`)}
+      ${tile('Предложений / согласовано / оплачено', `${k.offers}${sep}${k.agreed}${sep}${k.paid}`)}
+      ${tile('Разговоры без записи и причины', `<em class="${k.norec ? 'bad' : ''}">${k.norec}</em>`)}
+    </div>
+    <div class="ctl-tabs seg">
+      <button data-t="handed" class="${ctrlTab === 'handed' ? 'on' : ''}">Переданы за день · ${d.rows.length}</button>
+      <button data-t="flagged" class="${ctrlTab === 'flagged' ? 'on' : ''}">Остальные с красными флагами · ${d.flagged.length}</button>
+    </div>
+    ${rows.length ? `<div class="ctl-wrap"><table class="ctl-t">
+      <thead><tr><th>Клиент</th><th>Менеджер</th><th>Передано</th><th>Срок</th><th>Первый звонок</th><th>SLA</th>
+        <th>Источник</th><th>Звонок</th><th>Этап</th><th>Цена</th><th>Дата работ</th><th>Следующее действие</th><th>Предупреждения</th></tr></thead>
+      <tbody>${rows.map(ctlRow).join('')}</tbody></table></div>`
+      : `<div class="empty">${ctrlTab === 'handed' ? 'Нет заявок, переданных в этот день' : 'Красных флагов нет'}</div>`}`;
+
+  $$('#ctl [data-t]').forEach((b) => b.onclick = () => { ctrlTab = b.dataset.t; renderControl(); });
+  $$('#ctl [data-open]').forEach((a) => a.onclick = (e) => {
+    if (e.target.closest('audio, a[href]')) return;
+    current = Number(a.dataset.open);
+    go('inbox');
+  });
+}
+
+function ctlRow(r) {
+  const t = (s) => (s ? dayTime(s) : '—');
+  const due = r.due_at ? dt(r.due_at) : null;
+  const first = r.first_call_at ? dt(r.first_call_at) : null;
+  const late = due && (first ? first > due : due <= Date.now());
+  const n = r.next;
+  const nWhen = !n?.at ? '' : n.kind === 'task' || n.kind === 'call' ? dayTime(n.at) : esc(n.at);
+  return `<tr data-open="${r.id}">
+    <td><b dir="auto">${esc(r.name || '+' + r.phone)}</b><small>${r.name ? '+' + esc(r.phone) + ' · ' : ''}${esc(r.lang || '')}${r.service ? ' · ' + esc(r.service) : ''}</small></td>
+    <td>${esc(r.manager || '—')}</td>
+    <td class="num">${t(r.assigned_at)}</td>
+    <td class="num ${late ? 'bad' : ''}">${t(r.due_at)}</td>
+    <td class="num">${first ? t(r.first_call_at) : '<span class="bad">нет</span>'}</td>
+    <td class="num ${late ? 'bad' : ''}">${r.sla_min != null ? r.sla_min + ' мин' : '—'}</td>
+    <td>${r.source_url ? `<a href="${esc(r.source_url)}" target="_blank" rel="noopener">${esc(r.source || 'реклама')}</a>` : esc(r.source || '—')}${r.campaign ? `<small dir="auto">${esc(r.campaign)}</small>` : ''}</td>
+    <td>${esc(r.call_status || '—')}${r.calls > 1 ? `<small>попыток: ${r.calls}</small>` : ''}${r.recording
+      ? `<audio controls preload="none" src="/media/calls/${encodeURIComponent(r.recording)}"></audio>` : ''}</td>
+    <td>${esc(r.stage)}</td>
+    <td class="num">${r.price ? r.price.toLocaleString('ru-RU') + ' ₪' + (r.price_final ? '' : '<small>оценка бота</small>') : '—'}</td>
+    <td class="num">${esc(r.job_date || '—')}</td>
+    <td>${n ? `${esc(n.what)}<small>${[nWhen, n.who].filter(Boolean).join(' · ')}</small>` : '<span class="bad">нет</span>'}</td>
+    <td>${(r.warn || []).map((w) => `<span class="warn-i ${w.level}">${esc(w.text)}</span>`).join('') || '<span class="ok-tag">в порядке</span>'}</td>
+  </tr>`;
 }
 
 /* ───── настройки ───── */
@@ -1577,6 +1728,11 @@ function renderSettings() {
         + grp('Записи разговоров', 'Запись прикрепляют к звонку в карточке: MP3, M4A, WAV или OGG. Слушать могут только те, кто входит в админку.',
           srow('Размер файла до', '', unit('f-recmax', s.rec_max_mb ?? 50, 'МБ', 1, 200))
           + srow('Хранить', '0 — хранить всегда. Старые записи удаляются, сам звонок в истории остаётся.', unit('f-reckeep', s.rec_keep_days ?? 0, 'дней', 0, 3650)))
+        + grp('Контроль', 'Когда заявка получает предупреждение и что приходит владельцу. Все флаги видны на экране «Контроль дня».',
+          srow('Предложение без ответа', 'Клиент молчит после предложения дольше этого — заявка помечается.', unit('f-offerwait', s.offer_wait_hours ?? 48, 'часов', 1, 720))
+          + srow('Ждём фото/видео', 'Сколько ждать материал, прежде чем пометить заявку.', unit('f-mediawait', s.media_wait_hours ?? 24, 'часов', 1, 720))
+          + srow('Вечерний отчёт владельцу', 'За 15 минут до конца рабочего дня: сколько передано, обзвонено, что не закрыто. Приходит тем, у кого в списке выше роль «владелец».',
+            `<label class="switch"><input type="checkbox" id="f-evening" ${s.evening_report ? 'checked' : ''}></label>`))
     },
     ads: {
       lead: 'Клик по рекламе в Facebook или Instagram приносит вместе с первым сообщением карточку объявления: заголовок, ссылку и id клика. Название кампании из рекламного кабинета WhatsApp не передаёт — его задаёт справочник ниже.',
@@ -1791,6 +1947,8 @@ async function saveSettings() {
     })).filter((x) => x.name && x.rate);
     body.price_list = JSON.stringify(pl, null, 2);
   }
+  put('#f-offerwait', 'offer_wait_hours'); put('#f-mediawait', 'media_wait_hours');
+  if ($('#f-evening')) body.evening_report = $('#f-evening').checked;
   put('#f-sla', 'call_sla_min'); put('#f-recmax', 'rec_max_mb'); put('#f-reckeep', 'rec_keep_days');
   // менеджеры — отдельные записи: сначала проверяем все, потом сохраняем
   const rows = $$('.mgr-row').map((r) => ({ id: Number(r.dataset.id) || undefined, name: r.querySelector('.m-name').value.trim(),
@@ -1825,6 +1983,9 @@ async function loadList() {
     if (!c.needs_human) notified.delete(c.id);
   }
   const need = convs.filter((c) => c.needs_human).length;
+  const redN = convs.filter((c) => c.stage !== 'closed' && (c.warn || []).some((w) => w.level === 'red')).length;
+  const rb = $('#nav-red');
+  if (rb) { rb.textContent = redN; rb.classList.toggle('hidden', !redN); }
   const badge = $('#nav-need');
   badge.textContent = need; badge.classList.toggle('hidden', !need);
   $('#tab-need').textContent = need; $('#tab-need').classList.toggle('hidden', !need);
@@ -2077,6 +2238,7 @@ es.addEventListener('typing', (e) => {
 fetch('/api/wa/status').then((r) => r.json()).then(renderWa).catch(() => {});
 const deepLink = Number(new URLSearchParams(location.search).get('conv'));
 if (deepLink) current = deepLink;            // ссылка из уведомления менеджеру
-loadState().then(() => { go('inbox'); loadList(); loadStats(); });
-setInterval(() => { if (page === 'inbox') PAGES[page].render(); }, 60000);
+// ссылка из вечернего отчёта ведёт прямо на «Контроль дня»
+loadState().then(() => { go(location.hash === '#control' && !deepLink ? 'control' : 'inbox'); loadList(); loadStats(); });
+setInterval(() => { if (page === 'inbox' || page === 'control') PAGES[page].render(); }, 60000);
 setInterval(loadState, 60000);   // «рабочее время» должно переключаться само
