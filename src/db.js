@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { legacyStage, STAGES, CLOSE } from './stages.js';
+import { currentUser } from './context.js';
 
 const dir = path.join(process.cwd(), 'data');
 fs.mkdirSync(dir, { recursive: true });
@@ -70,6 +71,8 @@ const cols = db.prepare('PRAGMA table_info(conversations)').all().map((c) => c.n
 if (!cols.includes('chat_id')) db.exec('ALTER TABLE conversations ADD COLUMN chat_id TEXT');
 
 const mcols = db.prepare('PRAGMA table_info(messages)').all().map((c) => c.name);
+// кто из менеджеров написал клиенту: в общей переписке это должно быть видно
+if (!mcols.includes('author_name')) db.exec('ALTER TABLE messages ADD COLUMN author_name TEXT');
 if (!mcols.includes('media')) db.exec('ALTER TABLE messages ADD COLUMN media TEXT');   // JSON: [{file, mime, kind}]
 // чем было сообщение: обычный ответ, напоминание, подтверждение заказа — нужно для отчёта
 if (!mcols.includes('kind')) db.exec('ALTER TABLE messages ADD COLUMN kind TEXT');
@@ -110,6 +113,54 @@ db.exec(`CREATE TABLE IF NOT EXISTS managers (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 )`);
 
+// Этап 3: вход по своему логину. Пароль — только хэш (scrypt), сессии — отдельной таблицей
+const mgrCols = db.prepare('PRAGMA table_info(managers)').all().map((c) => c.name);
+if (!mgrCols.includes('login')) {
+  db.exec('ALTER TABLE managers ADD COLUMN login TEXT');
+  db.exec('ALTER TABLE managers ADD COLUMN pass TEXT');
+  db.exec('ALTER TABLE managers ADD COLUMN last_login_at TEXT');
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_managers_login ON managers(lower(login)) WHERE login IS NOT NULL');
+}
+db.exec(`CREATE TABLE IF NOT EXISTS sessions (
+  token_hash TEXT PRIMARY KEY,
+  user_id    INTEGER NOT NULL,              -- 0 — администратор из переменных окружения
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  seen_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  expires_at TEXT NOT NULL,
+  ip         TEXT,
+  ua         TEXT
+);
+-- Журнал доступа (ТЗ §4.3, §6.1): входы, прослушивание и удаление записей, выгрузки
+CREATE TABLE IF NOT EXISTS access_log (
+  id        INTEGER PRIMARY KEY AUTOINCREMENT,
+  at        TEXT NOT NULL DEFAULT (datetime('now')),
+  user_id   INTEGER,
+  user_name TEXT,
+  action    TEXT NOT NULL,
+  object    TEXT,
+  object_id INTEGER,
+  detail    TEXT,
+  ip        TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_access_at ON access_log(at);
+-- Сбои внешних сервисов и очередь повтора: WhatsApp, модель, распознавание речи
+CREATE TABLE IF NOT EXISTS integration_log (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  at          TEXT NOT NULL DEFAULT (datetime('now')),
+  kind        TEXT NOT NULL,              -- notify | whatsapp | ai | stt
+  target      TEXT,
+  conv_id     INTEGER,
+  payload     TEXT,
+  error       TEXT,
+  attempts    INTEGER NOT NULL DEFAULT 1,
+  status      TEXT NOT NULL DEFAULT 'failed',   -- retry | done | failed
+  next_try_at TEXT,
+  done_at     TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_integration_status ON integration_log(status, next_try_at);`);
+const auditCols = db.prepare('PRAGMA table_info(audit_log)').all().map((c) => c.name);
+if (!auditCols.includes('actor_id')) db.exec('ALTER TABLE audit_log ADD COLUMN actor_id INTEGER');
+
 // Звонки (ТЗ §6): каждая попытка отдельной строкой, с итогом и записью
 db.exec(`CREATE TABLE IF NOT EXISTS calls (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -126,6 +177,12 @@ db.exec(`CREATE TABLE IF NOT EXISTS calls (
   actor        TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_calls_conv ON calls(conv_id, id);`);
+const callCols = db.prepare('PRAGMA table_info(calls)').all().map((c) => c.name);
+if (!callCols.includes('rec_deleted_at')) {
+  // удалённая запись лежит в корзине: владелец может вернуть, пока не истёк срок
+  db.exec('ALTER TABLE calls ADD COLUMN rec_deleted_at TEXT');
+  db.exec('ALTER TABLE calls ADD COLUMN rec_deleted_by TEXT');
+}
 
 // Передача менеджеру: ответственный, когда передали, до какого времени позвонить
 if (!cols.includes('manager_id')) {
@@ -148,6 +205,12 @@ if (!cols.includes('next_action')) {
   if (moved) console.log(`Следующее действие: перенесено ${moved} напоминаний менеджеру`);
 }
 if (!cols.includes('stage_at')) db.exec('ALTER TABLE conversations ADD COLUMN stage_at TEXT');   // когда сменился этап
+// мягкое удаление (ТЗ §4.3): заявка пропадает из работы, но остаётся в базе и журнале
+if (!cols.includes('deleted_at')) {
+  db.exec('ALTER TABLE conversations ADD COLUMN deleted_at TEXT');
+  db.exec('ALTER TABLE conversations ADD COLUMN deleted_by TEXT');
+  db.exec('ALTER TABLE conversations ADD COLUMN delete_reason TEXT');
+}
 
 const needStages = !cols.includes('stage');
 if (needStages) {
@@ -479,6 +542,11 @@ export const setSetting = (k, v) =>
 export function getOrCreateConversation(channel, phone, name, chatId = null) {
   const found = db.prepare('SELECT * FROM conversations WHERE channel=? AND phone=?').get(channel, phone);
   if (found) {
+    // удалённая заявка, а клиент написал снова: живой клиент важнее пометки
+    if (found.deleted_at) {
+      db.prepare('UPDATE conversations SET deleted_at=NULL, deleted_by=NULL, delete_reason=NULL WHERE id=?').run(found.id);
+      audit('lead', found.id, 'deleted', found.deleted_at, null, 'система', 'клиент написал снова');
+    }
     if (name && !found.name) db.prepare('UPDATE conversations SET name=? WHERE id=?').run(name, found.id);
     // chat_id мог смениться (@lid ↔ @c.us) — всегда держим последний рабочий
     if (chatId && chatId !== found.chat_id) db.prepare('UPDATE conversations SET chat_id=? WHERE id=?').run(chatId, found.id);
@@ -495,9 +563,10 @@ export const messageExists = (waId) =>
   Boolean(waId) && Boolean(db.prepare('SELECT 1 FROM messages WHERE wa_id=?').get(waId));
 
 export function addMessage(convId, { direction, author, body, wa_id = null, error = null, media = null, kind = null }) {
+  const by = author === 'human' || author === 'system' ? currentUser()?.name ?? null : null;
   const { lastInsertRowid } = db
-    .prepare('INSERT INTO messages(conv_id,direction,author,body,wa_id,error,media,kind) VALUES(?,?,?,?,?,?,?,?)')
-    .run(convId, direction, author, body, wa_id, error, media?.length ? JSON.stringify(media) : null, kind);
+    .prepare('INSERT INTO messages(conv_id,direction,author,body,wa_id,error,media,kind,author_name) VALUES(?,?,?,?,?,?,?,?,?)')
+    .run(convId, direction, author, body, wa_id, error, media?.length ? JSON.stringify(media) : null, kind, by);
   db.prepare("UPDATE conversations SET last_at = datetime('now') WHERE id=?").run(convId);
   return db.prepare('SELECT * FROM messages WHERE id=?').get(lastInsertRowid);
 }
@@ -529,9 +598,27 @@ export function setSource(convId, src) {
 /** Запись в журнал изменений. Значения храним строками, как увидит человек. */
 export function audit(entity, entityId, field, oldValue, newValue, actor, reason = null) {
   if (String(oldValue ?? '') === String(newValue ?? '')) return;
-  db.prepare(`INSERT INTO audit_log(entity, entity_id, field, old_value, new_value, actor, reason)
-    VALUES(?,?,?,?,?,?,?)`).run(entity, entityId, field,
-    oldValue == null ? null : String(oldValue), newValue == null ? null : String(newValue), actor, reason);
+  // внутри запроса из админки автор — вошедший человек, а не безликое «менеджер»
+  const u = currentUser();
+  const who = u && (!actor || actor === 'менеджер') ? u.name : actor;
+  db.prepare(`INSERT INTO audit_log(entity, entity_id, field, old_value, new_value, actor, reason, actor_id)
+    VALUES(?,?,?,?,?,?,?,?)`).run(entity, entityId, field,
+    oldValue == null ? null : String(oldValue), newValue == null ? null : String(newValue), who, reason, u?.id ?? null);
+}
+
+/** Журнал доступа: входы, прослушивание записей, удаления, выгрузки. */
+export function logAccess(action, { object = null, objectId = null, detail = null, ip = null, user = currentUser() } = {}) {
+  db.prepare('INSERT INTO access_log(user_id, user_name, action, object, object_id, detail, ip) VALUES(?,?,?,?,?,?,?)')
+    .run(user?.id ?? null, user?.name ?? null, action, object, objectId, detail, ip);
+}
+
+/**
+ * Окончательную цену, дату работ и оплату ставит только человек (ТЗ §2, §4.3).
+ * Бот и фоновые задачи работают вне запроса из админки — у них пользователя нет,
+ * и запись этих полей для них технически невозможна, а не просто «не принята».
+ */
+export function assertHumanWrite(field) {
+  if (!currentUser()) throw new Error(`Поле «${field}» может менять только менеджер или владелец`);
 }
 
 const stageLabel = (stage, close) => (stage === 'closed' && close ? `closed:${close}` : stage || '');
@@ -572,8 +659,10 @@ export function resetData() {
   const convs = db.prepare('SELECT count(*) n FROM conversations').get().n;
   const msgs = db.prepare('SELECT count(*) n FROM messages').get().n;
   const jobs = db.prepare('SELECT count(*) n FROM jobs').get().n;
-  db.exec('DELETE FROM messages; DELETE FROM conversations; DELETE FROM jobs; DELETE FROM audit_log; DELETE FROM calls;');
-  try { db.exec("DELETE FROM sqlite_sequence WHERE name IN ('messages','conversations','jobs')"); } catch {}
+  // журнал изменений не стираем (ТЗ §4.3: аудит безвозвратно не удаляется). Поэтому
+  // и нумерацию заявок не сбрасываем: новая заявка №1 унаследовала бы чужую историю
+  db.exec('DELETE FROM messages; DELETE FROM conversations; DELETE FROM jobs; DELETE FROM calls;');
+  try { db.exec("DELETE FROM sqlite_sequence WHERE name IN ('messages','jobs')"); } catch {}
   let files = 0;
   const mediaDir = path.join(dir, 'media');
   if (!fs.existsSync(mediaDir)) return { conversations: convs, messages: msgs, jobs, files: 0 };
@@ -614,6 +703,7 @@ export function listConversations() {
       (SELECT count(*) FROM messages m WHERE m.conv_id = c.id AND m.direction = 'in'
         AND (m.media LIKE '%"kind":"image"%' OR m.media LIKE '%"kind":"video"%')) AS visual_count
     FROM conversations c
+    WHERE c.deleted_at IS NULL
     ORDER BY c.needs_human DESC, c.last_at DESC
   `).all();
 

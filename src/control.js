@@ -7,6 +7,8 @@
  * данные — флаг пропал сам.
  */
 import { db, getSetting, audit, waitsMedia } from './db.js';
+import { actorName } from './context.js';
+import { recUrl } from './auth.js';
 import { getManager, listManagers, sqlTime, CALL_STATUS } from './calls.js';
 import { localDate, localClock, workHours, isHoliday } from './schedule.js';
 import { dominantLang } from './lang.js';
@@ -25,7 +27,8 @@ function callStats(ids) {
       sum(status='answered') answered,
       sum(status='answered' AND recording IS NULL AND (no_record_reason IS NULL OR no_record_reason='')) norec,
       (SELECT status FROM calls k2 WHERE k2.conv_id=k.conv_id ORDER BY id DESC LIMIT 1) last_status,
-      (SELECT recording FROM calls k3 WHERE k3.conv_id=k.conv_id AND recording IS NOT NULL ORDER BY id DESC LIMIT 1) last_rec
+      (SELECT id FROM calls k3 WHERE k3.conv_id=k.conv_id AND recording IS NOT NULL AND rec_deleted_at IS NULL
+        ORDER BY id DESC LIMIT 1) last_rec
     FROM calls k WHERE conv_id IN (${ids.map(() => '?').join(',')}) GROUP BY conv_id`).all(...ids);
   return new Map(rows.map((r) => [r.conv_id, r]));
 }
@@ -98,7 +101,7 @@ export function annotate(rows) {
 
 /* ─────────── Следующее действие: запись ─────────── */
 
-export function setNext(convId, b, actor = 'менеджер') {
+export function setNext(convId, b, actor = actorName('менеджер')) {
   const c = db.prepare('SELECT * FROM conversations WHERE id=?').get(convId);
   if (!c) throw new Error('Нет такой заявки');
   // в журнал — само действие, а не звонок по сроку: звонок закрывается записью звонка
@@ -138,7 +141,7 @@ const stageText = (c) => (c.stage === 'closed' ? 'Закрыто · ' + (CLOSE_T
 export function controlDay(date = localDate()) {
   const convs = db.prepare(`SELECT c.*,
       (SELECT max(created_at) FROM messages m WHERE m.conv_id=c.id AND m.direction='in') last_in_at
-    FROM conversations c WHERE assigned_at IS NOT NULL OR stage != 'closed'`).all();
+    FROM conversations c WHERE c.deleted_at IS NULL AND (assigned_at IS NOT NULL OR stage != 'closed')`).all();
   const handed = convs.filter((c) => c.assigned_at && localDate(parse(c.assigned_at)) === date);
   for (const c of convs) c.wait_media = waitsMedia(c);
   annotate(convs);
@@ -185,7 +188,7 @@ export function controlDay(date = localDate()) {
       manager: getManager(c.manager_id)?.name || '', assigned_at: c.assigned_at, due_at: c.handoff_due_at,
       first_call_at: k.first_at || null, sla_min: sla, source: c.source || '', campaign: c.source_title || '',
       source_url: c.source_url || '', lang, service: l.service || '',
-      call_status: k.last_status ? CALL_STATUS[k.last_status] : '', calls: k.n || 0, recording: k.last_rec || null,
+      call_status: k.last_status ? CALL_STATUS[k.last_status] : '', calls: k.n || 0, rec_url: k.last_rec ? recUrl(k.last_rec) : null,
       stage: stageText(c), price: c.deal_sum || amountOf(l.price_quote) || null, price_final: Boolean(c.deal_sum),
       job_date: c.job_date || '', next: c.next, warn: c.warn
     };
@@ -217,7 +220,7 @@ const whoOf = (c) => leadOf(c).name || c.name || `+${c.phone}`;
 
 /** Срок действия наступил — напоминаем тому, кто его делает, один раз. */
 async function remindTasks() {
-  const due = db.prepare(`SELECT * FROM conversations WHERE next_action IS NOT NULL AND next_action_at <= datetime('now')
+  const due = db.prepare(`SELECT * FROM conversations WHERE deleted_at IS NULL AND next_action IS NOT NULL AND next_action_at <= datetime('now')
     AND next_action_notified_at IS NULL AND stage != 'closed'`).all();
   for (const c of due) {
     db.prepare("UPDATE conversations SET next_action_notified_at=datetime('now') WHERE id=?").run(c.id);

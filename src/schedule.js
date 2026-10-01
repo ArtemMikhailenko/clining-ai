@@ -160,7 +160,7 @@ export function sweepStale() {
   if (!days) return 0;
   const rows = db.prepare(`
     SELECT id FROM conversations
-    WHERE status != 'closed' AND needs_human = 0 AND last_at < datetime('now', ?)`).all(`-${days} days`);
+    WHERE status != 'closed' AND needs_human = 0 AND deleted_at IS NULL AND last_at < datetime('now', ?)`).all(`-${days} days`);
   for (const r of rows) {
     db.prepare("UPDATE conversations SET status='closed' WHERE id=?").run(r.id);
     db.prepare("INSERT INTO messages(conv_id,direction,author,body) VALUES(?,'out','system',?)")

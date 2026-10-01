@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#f3f4f6" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#060607" media="(prefers-color-scheme: dark)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Клининг">
+<link rel="manifest" href="/manifest.webmanifest" crossorigin="use-credentials">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/icon-180.png">
+<title>Вход · Клининг CRM</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,400..700&family=Space+Grotesk:wght@500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#f3f4f6; --surface:#fff; --border:#e9e9ee; --text:#101014; --text-2:#4a4c55; --muted:#8b8d96;
+  --accent:#12766a; --accent-2:#159b8b; --danger:#d92d20; --danger-soft:#fdeceb;
+  --ring:0 0 0 3px color-mix(in srgb,var(--accent) 18%,transparent);
+  color-scheme:light;
+}
+@media (prefers-color-scheme:dark){
+  :root{--bg:#060607;--surface:#131316;--border:#26262d;--text:#f1f1f4;--text-2:#b2b4bd;--muted:#82848e;
+    --accent:#2bb3a0;--accent-2:#3ecbb6;--danger:#f2706a;--danger-soft:#391b1b;color-scheme:dark}
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--text);font:14px/1.5 Inter,-apple-system,"Segoe UI",sans-serif;
+  display:grid;place-items:center;padding:24px 16px}
+.card{width:100%;max-width:360px;background:var(--surface);border:.5px solid var(--border);border-radius:16px;
+  padding:28px 24px 24px;box-shadow:0 1px 2px rgba(16,16,24,.04),0 12px 32px -12px rgba(16,16,24,.12)}
+.brand{display:flex;align-items:center;gap:10px;margin-bottom:22px}
+.brand img{width:34px;height:34px;border-radius:9px}
+.brand b{font-family:"Space Grotesk",Inter,sans-serif;font-size:17px;font-weight:600;letter-spacing:.01em}
+.brand span{display:block;font-size:12px;color:var(--muted)}
+h1{font-family:"Space Grotesk",Inter,sans-serif;font-size:22px;font-weight:600;margin:0 0 4px}
+p.sub{margin:0 0 20px;color:var(--text-2);font-size:13px}
+form{display:flex;flex-direction:column;gap:12px}
+label{display:flex;flex-direction:column;gap:5px;font-size:12px;color:var(--muted)}
+input{font:inherit;font-size:15px;color:var(--text);background:var(--surface);border:.5px solid color-mix(in srgb,var(--text) 18%,transparent);
+  border-radius:10px;padding:10px 12px;outline:none;transition:border-color .14s,box-shadow .14s}
+input:focus{border-color:var(--accent);box-shadow:var(--ring)}
+button{margin-top:6px;font:inherit;font-weight:560;font-size:14px;color:#fff;background:var(--accent);border:0;border-radius:10px;
+  padding:11px 14px;cursor:pointer;transition:background .14s}
+button:hover{background:var(--accent-2)}
+button:disabled{opacity:.6;cursor:default}
+.err{display:none;font-size:13px;color:var(--danger);background:var(--danger-soft);border-radius:8px;padding:8px 10px}
+.err.on{display:block}
+.note{margin-top:16px;font-size:12px;color:var(--muted);text-align:center}
+</style>
+</head>
+<body>
+<main class="card">
+  <div class="brand"><img src="/icon.svg" alt=""><div><b>HAMENAKIM</b><span>CRM · заявки и звонки</span></div></div>
+  <h1>Вход</h1>
+  <p class="sub">Логин и пароль выдаёт владелец в настройках.</p>
+  <form id="f" autocomplete="on">
+    <label>Логин<input name="login" autocomplete="username" autocapitalize="none" spellcheck="false" required></label>
+    <label>Пароль<input name="password" type="password" autocomplete="current-password" required></label>
+    <div class="err" id="err"></div>
+    <button type="submit" id="go">Войти</button>
+  </form>
+  <div class="note">Забыли пароль — попросите владельца задать новый.</div>
+</main>
+<script>
+const f = document.getElementById('f');
+const err = document.getElementById('err');
+const go = document.getElementById('go');
+// возвращаем туда, откуда выкинуло: ссылка из уведомления должна открыть свою заявку
+const next = (() => {
+  const n = new URLSearchParams(location.search).get('next') || '/';
+  return n.startsWith('/') && !n.startsWith('//') && !n.startsWith('/login') ? n : '/';
+})();
+f.onsubmit = async (e) => {
+  e.preventDefault();
+  err.classList.remove('on');
+  go.disabled = true; go.textContent = 'Входим…';
+  try {
+    const r = await fetch('/api/login', { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ login: f.login.value.trim(), password: f.password.value }) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || 'Не получилось войти');
+    location.replace(next);
+  } catch (x) {
+    err.textContent = x.message; err.classList.add('on');
+    go.disabled = false; go.textContent = 'Войти';
+  }
+};
+f.login.focus();
+</script>
+</body>
+</html>

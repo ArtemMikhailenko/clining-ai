@@ -3,7 +3,8 @@ import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
 import { spawn } from 'node:child_process';
-import { db, listConversations, getConversation, history, getSetting, setSetting, addMessage, resetData, applyStage, audit, waitsMedia } from './db.js';
+import { db, listConversations, getConversation, history, getSetting, setSetting, addMessage, resetData, applyStage, audit,
+  waitsMedia, logAccess, assertHumanWrite } from './db.js';
 import { stageIndex, amountOf, STAGE_TITLE, CLOSE_TITLE } from './stages.js';
 import { handleIncoming, sendAsHuman, suggestReply, subscribe, emit } from './bot.js';
 import * as botState from './bot.js';
@@ -15,9 +16,14 @@ import { waStatus, onStatus, requestPairing, logout as waLogout, restart as waRe
 import { sttLabel } from './stt.js';
 import { notifyManagers, adminLink, localTime } from './notify.js';
 import { annotate, setNext, controlDay, startControl } from './control.js';
+import { runAs } from './context.js';
+import { ADMIN, authEnabled, sessionUser, basicUser, readCookie, setCookie, login, logout, changeOwnPassword,
+  setPassword, dropSessions, recUrl, recValid } from './auth.js';
+import { listFailures, retryNow, startRetries } from './integrations.js';
 import { localDate } from './schedule.js';
 import { listManagers, saveManager, deleteManager, getManager, setManager, assignHandoff, clearCallDue,
-  listCalls, logCall, saveRecording, sweepRecordings, overdueCalls, CALL_STATUS } from './calls.js';
+  listCalls, logCall, saveRecording, sweepRecordings, overdueCalls, CALL_STATUS, recordingFile, deleteRecording,
+  restoreRecording, purgeTrash } from './calls.js';
 import { aiConfigured, aiLabel } from './ai.js';
 
 /* ─────────── Процесс не должен умирать молча ───────────
@@ -37,21 +43,81 @@ app.use(express.json({ limit: '25mb' }));   // фото приходят base64 
 
 const PORT = process.env.PORT || 3000;
 
-/* ─────────── Доступ в админку ───────────
+/* ─────────── Доступ в админку (ТЗ §4.3, этап 3) ───────────
    В базе — телефоны и переписка клиентов, то есть персональные данные.
-   Без ADMIN_PASS панель открыта всем, кто дотянется до порта. */
-const ADMIN_USER = process.env.ADMIN_USER || 'admin';
-const ADMIN_PASS = process.env.ADMIN_PASS || '';
+   У каждого менеджера свой вход; администратор из ADMIN_USER / ADMIN_PASS —
+   аварийный вход с правами владельца. Пароля нет нигде — админка открыта,
+   как раньше (только для разработки). */
+const PUBLIC = /^\/(manifest\.webmanifest|icon[\w-]*\.(png|svg)|healthz|login\.html|api\/login|webhook)$/;
+app.set('trust proxy', 1);                 // Render отдаёт https через прокси: нужно для Secure-cookie
 
 app.use((req, res, next) => {
-  // иконки и манифест телефон запрашивает без пароля — иначе не установить на экран «Домой»
-  if (/^\/(manifest\.webmanifest|icon[\w-]*\.(png|svg)|healthz)$/.test(req.path)) return next();
-  if (req.path === '/webhook') return next();          // вебхук провайдера — своя проверка
-  if (!ADMIN_PASS) return next();                      // пароль не задан — не запираем
-  const hdr = req.headers.authorization || '';
-  const [user, pass] = Buffer.from(hdr.replace(/^Basic /i, ''), 'base64').toString().split(':');
-  if (user === ADMIN_USER && pass === ADMIN_PASS) return next();
-  res.set('WWW-Authenticate', 'Basic realm="CRM"').status(401).send('Требуется вход');
+  if (PUBLIC.test(req.path)) return next();
+  const user = authEnabled() ? (sessionUser(readCookie(req)) || basicUser(req)) : ADMIN;
+  if (!user) {
+    if (/^\/(api|media|rec)\//.test(req.path)) return res.status(401).json({ error: 'Нужно войти', login: true });
+    return res.redirect('/login.html?next=' + encodeURIComponent(req.originalUrl));
+  }
+  req.user = user;
+  runAs(user, next);
+});
+
+/* Права (ТЗ §4.3). Владелец может всё; менеджер работает с заявками, но
+   настройки, учётки, журналы, удаление и обслуживание — только владельцу.
+   Чужую заявку менеджер сначала берёт себе — это видно в журнале. */
+const OWNER_ONLY = [
+  ['POST', /^\/api\/state$/], ['POST', /^\/api\/managers$/], ['DELETE', /^\/api\/managers\/\d+$/],
+  ['*', /^\/api\/maintenance\//], ['POST', /^\/api\/wa\/(pair|logout|restart)$/], ['POST', /^\/api\/sim\//],
+  ['GET', /^\/api\/logs\//], ['POST', /^\/api\/logs\//], ['POST', /^\/api\/conversations\/\d+\/(delete|restore)$/],
+  ['GET', /^\/api\/conversations\/deleted$/], ['*', /^\/api\/calls\/\d+\/recording/]
+];
+const CONV_WRITE = /^\/api\/conversations\/(\d+)\/(lead|note|send|mode|stage|flag|reviewed|next|calls|status)$/;
+
+app.use((req, res, next) => {
+  const u = req.user;
+  if (!u || u.role === 'owner') return next();
+  // автоответы ИИ менеджер может включить и выключить сам — это работа, а не настройка
+  const aiToggle = req.path === '/api/state' && Object.keys(req.body || {}).join() === 'ai_global';
+  if (!aiToggle && OWNER_ONLY.some(([m, re]) => (m === '*' || m === req.method) && re.test(req.path))) {
+    return res.status(403).json({ error: 'Это может только владелец' });
+  }
+  const w = req.method === 'POST' && CONV_WRITE.exec(req.path);
+  if (w) {
+    const conv = getConversation(Number(w[1]));
+    if (conv?.manager_id && conv.manager_id !== u.id) {
+      const who = getManager(conv.manager_id)?.name || 'другой менеджер';
+      return res.status(403).json({ error: `Заявку ведёт ${who}. Чтобы работать с ней, нажмите «Взять себе»`, take: true });
+    }
+    // оплаченная сделка — итог для отчётов: исправляет её только владелец
+    if (conv?.close_reason === 'paid' && ['lead', 'stage'].includes(w[2])) {
+      return res.status(403).json({ error: 'Оплаченную сделку исправляет владелец' });
+    }
+  }
+  next();
+});
+
+app.post('/api/login', (req, res) => {
+  try {
+    const { token, user } = login(req.body?.login, req.body?.password, { ip: req.ip, ua: req.headers['user-agent'] });
+    setCookie(req, res, token);
+    res.json({ user });
+  } catch (e) { res.status(401).json({ error: e.message }); }
+});
+app.post('/api/logout', (req, res) => {
+  logAccess('logout', { ip: req.ip });
+  logout(readCookie(req));
+  setCookie(req, res, null);
+  res.json({ ok: true });
+});
+app.get('/api/me', (req, res) => res.json({ ...req.user, auth: authEnabled() }));
+app.post('/api/me/password', (req, res) => {
+  try {
+    changeOwnPassword(req.user, req.body?.old, req.body?.password);
+    // смена пароля выкидывает все сессии — эту открываем заново
+    const { token } = login(req.user.login, req.body?.password, { ip: req.ip, ua: req.headers['user-agent'] });
+    setCookie(req, res, token);
+    res.json({ ok: true });
+  } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
 // без этого браузер держит старый app.js после обновления и показывает
@@ -64,8 +130,20 @@ app.use(express.static(path.join(process.cwd(), 'public'), {
     if (/\.(html|js|css)$/.test(file)) res.setHeader('Cache-Control', 'no-cache');
   }
 }));
-// файлы клиентов — под тем же паролем, что и вся админка
+// файлы клиентов — под тем же входом, что и вся админка. Записи разговоров
+// отдельно: только по подписанной ссылке, и каждое прослушивание в журнале
+app.use('/media/calls', (req, res) => res.sendStatus(404));
 app.use('/media', express.static(path.join(process.cwd(), 'data', 'media')));
+app.get('/rec/:id', (req, res) => {
+  const id = Number(req.params.id);
+  if (!recValid(id, req.query.exp, req.query.sig)) return res.status(403).send('Ссылка устарела — откройте карточку заново');
+  const r = recordingFile(id);
+  if (!r) return res.sendStatus(404);
+  // плеер дочитывает файл кусками — в журнал пишем только начало прослушивания
+  const range = String(req.headers.range || '');
+  if (!range || /^bytes=0-/.test(range)) logAccess('recording_listen', { object: 'call', objectId: id, ip: req.ip });
+  res.sendFile(r.file);
+});
 
 /* ─────────── Webhook: вход из WhatsApp ─────────── */
 
@@ -111,6 +189,8 @@ app.get('/api/state', (req, res) => {
     media_wait_hours: Number(getSetting('media_wait_hours')) || 24,
     evening_report: getSetting('evening_report') === '1',
     managers: listManagers(),
+    me: req.user,
+    me_auth: authEnabled(),
     call_status: CALL_STATUS,
     ai_effort: getSetting('ai_effort') || process.env.AI_EFFORT || 'low',
     stt_label: sttLabel(),
@@ -192,13 +272,17 @@ app.post('/api/state', (req, res) => {
   res.json({ ok: true });
 });
 
+app.get('/api/conversations/deleted', (req, res) => {
+  res.json(db.prepare(`SELECT id, phone, name, lead, stage, close_reason, deleted_at, deleted_by, delete_reason
+    FROM conversations WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC`).all());
+});
 app.get('/api/conversations', (req, res) => res.json(annotate(listConversations())));
 
 /** Сводка по заявкам за период. Всё считается из тех же диалогов, без отдельной аналитики. */
 app.get('/api/stats', (req, res) => {
   const days = Math.min(365, Math.max(1, Number(req.query.days) || 30));
   const since = `-${days} days`;
-  const rows = db.prepare("SELECT * FROM conversations WHERE created_at >= datetime('now', ?)").all(since);
+  const rows = db.prepare("SELECT * FROM conversations WHERE deleted_at IS NULL AND created_at >= datetime('now', ?)").all(since);
   const leads = rows.map((c) => ({ ...c, l: JSON.parse(c.lead || '{}') }));
 
   const count = (fn) => leads.filter(fn).length;
@@ -229,7 +313,7 @@ app.get('/api/stats', (req, res) => {
     SELECT c.id,
       (SELECT min(created_at) FROM messages m WHERE m.conv_id=c.id AND m.direction='in')  AS first_in,
       (SELECT min(created_at) FROM messages m WHERE m.conv_id=c.id AND m.direction='out' AND m.author='ai') AS first_out
-    FROM conversations c WHERE c.created_at >= datetime('now', ?)`).all(since)
+    FROM conversations c WHERE c.deleted_at IS NULL AND c.created_at >= datetime('now', ?)`).all(since)
     .filter((r) => r.first_in && r.first_out)
     // считаем в рабочих часах: ночная пауза — не медлительность бота.
     // медиана, а не среднее: один зависший диалог не должен красить всю картину
@@ -256,7 +340,7 @@ app.get('/api/stats', (req, res) => {
   // предыдущий такой же период — без сравнения число само по себе ничего не говорит
   const prevRows = db.prepare(`
     SELECT * FROM conversations
-    WHERE created_at >= datetime('now', ?) AND created_at < datetime('now', ?)`)
+    WHERE deleted_at IS NULL AND created_at >= datetime('now', ?) AND created_at < datetime('now', ?)`)
     .all(`-${days * 2} days`, since)
     .map((c) => ({ ...c, l: JSON.parse(c.lead || '{}') }));
   const prevMoney = nums(prevRows, (c) => c.deal_sum);
@@ -332,9 +416,19 @@ app.post('/api/conversations/:id/lead', (req, res) => {
 
   const lead = JSON.parse(conv.lead || '{}');
   const stageMoves = [];
+  try {
+    // окончательная цена, дата работ и оплата — только от человека (ТЗ §4.3)
+    for (const k of ['job_date', 'job_time', 'deal_sum', 'paid_sum', 'paid_at']) if (k in req.body) assertHumanWrite(k);
+  } catch (e) { return res.status(403).json({ error: e.message }); }
+  // источник — атрибуция рекламы: менять можно, но только с причиной (ТЗ §4.3, §5.1)
+  if ('source' in req.body && String(req.body.source ?? '').trim() !== String(conv.source ?? '')
+      && !String(req.body.source_reason ?? '').trim()) {
+    return res.status(400).json({ error: 'Укажите причину смены источника', need_reason: 'source' });
+  }
   for (const k of LEAD_FIELDS) {
     if (k in req.body) {
       const v = String(req.body[k] ?? '').trim();
+      if (String(lead[k] ?? '') !== v) audit('lead', id, 'lead.' + k, lead[k] ?? null, v || null, 'менеджер');
       if (v) lead[k] = v; else delete lead[k];
     }
   }
@@ -352,6 +446,8 @@ app.post('/api/conversations/:id/lead', (req, res) => {
     const jt = String(req.body.job_time ?? conv.job_time ?? '').trim();
     db.prepare('UPDATE conversations SET job_date=?, job_time=?, confirm_sent=CASE WHEN job_date IS ? THEN confirm_sent ELSE NULL END WHERE id=?')
       .run(jd || null, jt || null, jd || null, id);
+    audit('lead', id, 'job_date', [conv.job_date, conv.job_time].filter(Boolean).join(' ') || null,
+      [jd, jt].filter(Boolean).join(' ') || null, 'менеджер');
     if (jd && lead.stage !== 'отказ') lead.stage = 'дата согласована';
     if (!jd && lead.stage === 'дата согласована') lead.stage = 'готов к заказу';
     stageMoves.push(jd ? ['agreed', 'менеджер поставил дату записи'] : null);
@@ -372,6 +468,7 @@ app.post('/api/conversations/:id/lead', (req, res) => {
     const d = String(req.body.paid_at ?? '').trim();
     if (d && !/^\d{4}-\d{2}-\d{2}$/.test(d)) return res.status(400).json({ error: 'Дата оплаты — ГГГГ-ММ-ДД' });
     db.prepare('UPDATE conversations SET paid_at=? WHERE id=?').run(d || null, id);
+    audit('lead', id, 'paid_at', conv.paid_at, d || null, 'менеджер');
   }
   // Напоминание можно поправить руками: клиент позвонил и перенёс сроки,
   // а бот об этом не знает — в переписке этого не было.
@@ -389,7 +486,10 @@ app.post('/api/conversations/:id/lead', (req, res) => {
       .run(at || null, at ? (note || null) : null, id);
   }
   if ('source' in req.body) {
-    db.prepare('UPDATE conversations SET source=? WHERE id=?').run(String(req.body.source ?? '').trim() || null, id);
+    // source_raw (что прислала Meta) не трогаем никогда — правится только отображаемое имя
+    const src = String(req.body.source ?? '').trim() || null;
+    db.prepare('UPDATE conversations SET source=? WHERE id=?').run(src, id);
+    audit('lead', id, 'source', conv.source, src, 'менеджер', String(req.body.source_reason ?? '').trim() || null);
   }
   db.prepare('UPDATE conversations SET lead=? WHERE id=?').run(JSON.stringify(lead), id);
 
@@ -469,7 +569,7 @@ app.delete('/api/jobs/:id', (req, res) => {
 app.get('/api/schedule', (req, res) => {
   // в расписание попадает только подтверждённая запись (job_date), а не
   // пожелание клиента из карточки: «хочу в субботу» — это ещё не заказ
-  const rows = db.prepare("SELECT * FROM conversations WHERE status != 'closed' AND job_date IS NOT NULL AND job_date != ''").all()
+  const rows = db.prepare("SELECT * FROM conversations WHERE deleted_at IS NULL AND status != 'closed' AND job_date IS NOT NULL AND job_date != ''").all()
     .map((c) => ({ ...c, l: JSON.parse(c.lead || '{}') }))
     .filter((c) => /^\d{4}-\d{2}-\d{2}$/.test(c.job_date || ''))
     .map((c) => ({
@@ -490,7 +590,7 @@ app.get('/api/schedule', (req, res) => {
 
   // пожелания клиентов: дата названа боту, но менеджер её ещё не подтвердил.
   // Показываем в календаре отдельно — чтобы день не выглядел свободным
-  const wishes = db.prepare("SELECT * FROM conversations WHERE status != 'closed' AND (job_date IS NULL OR job_date = '')").all()
+  const wishes = db.prepare("SELECT * FROM conversations WHERE deleted_at IS NULL AND status != 'closed' AND (job_date IS NULL OR job_date = '')").all()
     .map((c) => ({ ...c, l: JSON.parse(c.lead || '{}') }))
     .filter((c) => /^\d{4}-\d{2}-\d{2}$/.test(c.l.date_iso || '') && c.l.stage !== 'отказ')
     .map((c) => ({
@@ -581,6 +681,87 @@ app.post('/api/conversations/:id/reviewed', (req, res) => {
 });
 
 /** История этапов и ключевых полей — для карточки. */
+/**
+ * Единая история карточки (ТЗ §4.2): изменения полей, звонки, системные события
+ * и — по желанию — переписка. Каждая запись с автором и временем.
+ */
+app.get('/api/conversations/:id/timeline', (req, res) => {
+  const id = Number(req.params.id);
+  const items = [];
+  for (const a of db.prepare("SELECT * FROM audit_log WHERE entity='lead' AND entity_id=?").all(id)) {
+    items.push({ at: a.at, type: 'change', field: a.field, old: a.old_value, new: a.new_value, who: a.actor, reason: a.reason });
+  }
+  for (const k of listCalls(id, signRecUrl)) {
+    items.push({ at: k.at, type: 'call', status: CALL_STATUS[k.status] || k.status, who: k.actor || k.manager_name,
+      duration: k.duration_sec, outcome: k.outcome, next: k.next_call_at, rec_url: k.rec_url,
+      rec_deleted: k.rec_deleted_at ? `удалена: ${k.rec_deleted_by || ''}` : null, no_rec: k.no_record_reason, call_id: k.id });
+  }
+  const withMsgs = req.query.messages === '1';
+  for (const m of db.prepare('SELECT id, created_at, direction, author, author_name, body, kind FROM messages WHERE conv_id=? ORDER BY id').all(id)) {
+    if (m.author === 'system' || withMsgs) {
+      const who = m.author === 'customer' ? 'клиент' : m.author === 'ai' ? 'бот' : m.author_name || (m.author === 'human' ? 'менеджер' : 'система');
+      items.push({ at: m.created_at, type: m.author === 'system' ? 'event' : 'message', who, text: m.body, dir: m.direction });
+    }
+  }
+  // в одну секунду бывает несколько изменений: внутри секунды — порядок записи в журнал
+  items.forEach((x, i) => { x.seq = i; });
+  items.sort((a, b) => String(b.at).localeCompare(String(a.at)) || b.seq - a.seq);
+  res.json(items.slice(0, 500));
+});
+
+/* Мягкое удаление (ТЗ §4.3): заявка уходит из работы, но остаётся в базе и журнале */
+app.post('/api/conversations/:id/delete', (req, res) => {
+  const id = Number(req.params.id);
+  const reason = String(req.body?.reason || '').trim();
+  if (!reason) return res.status(400).json({ error: 'Укажите причину удаления' });
+  const conv = getConversation(id);
+  if (!conv || conv.deleted_at) return res.sendStatus(404);
+  db.prepare("UPDATE conversations SET deleted_at=datetime('now'), deleted_by=?, delete_reason=?, call_due_at=NULL WHERE id=?")
+    .run(req.user.name, reason, id);
+  audit('lead', id, 'deleted', null, 'удалена', 'менеджер', reason);
+  logAccess('lead_delete', { object: 'lead', objectId: id, detail: reason, ip: req.ip });
+  emit('conversations', null);
+  res.json({ ok: true });
+});
+app.post('/api/conversations/:id/restore', (req, res) => {
+  const id = Number(req.params.id);
+  const conv = getConversation(id);
+  if (!conv?.deleted_at) return res.sendStatus(404);
+  db.prepare('UPDATE conversations SET deleted_at=NULL, deleted_by=NULL, delete_reason=NULL WHERE id=?').run(id);
+  audit('lead', id, 'deleted', 'удалена', null, 'менеджер', 'восстановлена');
+  logAccess('lead_restore', { object: 'lead', objectId: id, ip: req.ip });
+  emit('conversations', null);
+  res.json(getConversation(id));
+});
+
+/* Записи разговоров: удалить и вернуть — только владелец, с причиной */
+app.delete('/api/calls/:id/recording', (req, res) => {
+  try { deleteRecording(Number(req.params.id), req.body?.reason); res.json({ ok: true }); }
+  catch (e) { res.status(400).json({ error: e.message }); }
+});
+app.post('/api/calls/:id/recording/restore', (req, res) => {
+  try { restoreRecording(Number(req.params.id)); res.json({ ok: true }); }
+  catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+/* Журналы для владельца: изменения, доступ, сбои */
+app.get('/api/logs/audit', (req, res) => {
+  const q = String(req.query.q || '').trim();
+  const rows = db.prepare(`SELECT a.*, c.name AS conv_name, c.phone AS conv_phone FROM audit_log a
+    LEFT JOIN conversations c ON a.entity='lead' AND c.id=a.entity_id
+    ${q ? "WHERE a.actor LIKE ? OR a.field LIKE ? OR a.new_value LIKE ? OR a.old_value LIKE ? OR c.phone LIKE ? OR c.name LIKE ?" : ''}
+    ORDER BY a.id DESC LIMIT 300`).all(...(q ? Array(6).fill(`%${q}%`) : []));
+  res.json(rows);
+});
+app.get('/api/logs/access', (req, res) => {
+  res.json(db.prepare('SELECT * FROM access_log ORDER BY id DESC LIMIT 300').all());
+});
+app.get('/api/logs/failures', (req, res) => res.json(listFailures()));
+app.post('/api/logs/failures/:id/retry', (req, res) => {
+  try { retryNow(Number(req.params.id)); res.json({ ok: true }); }
+  catch (e) { res.status(400).json({ error: e.message }); }
+});
+
 app.get('/api/conversations/:id/audit', (req, res) => {
   res.json(db.prepare('SELECT * FROM audit_log WHERE entity=? AND entity_id=? ORDER BY id DESC LIMIT 100')
     .all('lead', Number(req.params.id)));
@@ -590,18 +771,40 @@ app.get('/api/conversations/:id/audit', (req, res) => {
 
 app.get('/api/managers', (req, res) => res.json(listManagers()));
 app.post('/api/managers', (req, res) => {
-  try { res.json(saveManager(req.body || {})); emit('conversations', null); }
-  catch (e) { res.status(400).json({ error: e.message }); }
+  try {
+    const b = req.body || {};
+    if (b.password && !String(b.login || '').trim()) throw new Error(`У «${b.name || 'менеджера'}» нужен логин, чтобы задать пароль`);
+    const m = saveManager(b);
+    if (b.password) {
+      setPassword(m.id, String(b.password));
+      audit('manager', m.id, 'password', null, 'задан новый', 'менеджер');
+      logAccess('password_set', { object: 'manager', objectId: m.id, detail: m.name });
+    }
+    emit('conversations', null);
+    res.json(getManager(m.id));
+  } catch (e) { res.status(400).json({ error: e.message }); }
 });
 app.delete('/api/managers/:id', (req, res) => {
-  deleteManager(Number(req.params.id));
+  const id = Number(req.params.id);
+  if (id === req.user?.id) return res.status(400).json({ error: 'Себя удалить нельзя' });
+  const m = getManager(id);
+  dropSessions(id);
+  deleteManager(id);
+  if (m) audit('manager', id, 'deleted', m.name, null, 'менеджер');
   emit('conversations', null);
   res.json({ ok: true });
 });
 
 app.post('/api/conversations/:id/manager', (req, res) => {
   const id = Number(req.params.id);
-  try { setManager(id, Number(req.body.manager_id) || null); }
+  const to = Number(req.body.manager_id) || null;
+  const u = req.user;
+  // менеджер может взять заявку себе; передать другому — только свою или ничью
+  if (u?.role !== 'owner') {
+    const cur = getConversation(id)?.manager_id;
+    if (to !== u.id && cur && cur !== u.id) return res.status(403).json({ error: 'Передать чужую заявку может её менеджер или владелец' });
+  }
+  try { setManager(id, to); }
   catch (e) { return res.status(400).json({ error: e.message }); }
   emit('conversations', null);
   res.json(getConversation(id));
@@ -621,13 +824,14 @@ app.get('/api/control', (req, res) => {
   res.json(controlDay(d));
 });
 
-app.get('/api/conversations/:id/calls', (req, res) => res.json(listCalls(Number(req.params.id))));
+const signRecUrl = (callId) => recUrl(callId);
+app.get('/api/conversations/:id/calls', (req, res) => res.json(listCalls(Number(req.params.id), signRecUrl)));
 app.post('/api/conversations/:id/calls', (req, res) => {
   const id = Number(req.params.id);
   try { logCall(id, req.body || {}); }
   catch (e) { return res.status(400).json({ error: e.message }); }
   emit('conversations', null);
-  res.json({ conv: getConversation(id), calls: listCalls(id) });
+  res.json({ conv: getConversation(id), calls: listCalls(id, signRecUrl) });
 });
 
 // запись разговора — сырым телом: JSON с base64 на 50 МБ раздувает память
@@ -653,6 +857,7 @@ app.post('/api/maintenance/reset', (req, res) => {
     return res.status(400).json({ error: 'Не подтверждено' });
   }
   const gone = resetData();
+  logAccess('data_reset', { detail: `диалогов ${gone.conversations}, сообщений ${gone.messages}`, ip: req.ip });
   emit('conversations', null);
   console.log(`Данные стёрты: диалогов ${gone.conversations}, сообщений ${gone.messages}, файлов ${gone.files}`);
   res.json(gone);
@@ -666,6 +871,7 @@ app.post('/api/maintenance/reset', (req, res) => {
  * не кладём: с ними можно увести сессию номера.
  */
 app.get('/api/maintenance/export', (req, res) => {
+  logAccess('backup_export', { ip: req.ip });
   const dataDir = path.join(process.cwd(), 'data');
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'backup-'));
   const snap = path.join(tmp, 'app.db');
@@ -782,14 +988,15 @@ setInterval(async () => {
     emit('conversations', null);
   }
 }, 6e4).unref?.();
-setInterval(sweepRecordings, 36e5).unref?.();
+setInterval(() => { sweepRecordings(); purgeTrash(); }, 36e5).unref?.();
+startRetries();
 startControl();
 
 app.listen(PORT, async () => {
   console.log(`\n  Админка:    http://localhost:${PORT}`);
   console.log(`  Симулятор:  http://localhost:${PORT}/sim.html`);
   console.log(`  Webhook:    POST http://localhost:${PORT}/webhook`);
-  if (!ADMIN_PASS) console.log('  ⚠ ADMIN_PASS не задан — админка открыта без пароля\n');
+  if (!authEnabled()) console.log('  ⚠ ADMIN_PASS не задан и учёток нет — админка открыта без пароля\n');
   console.log(`  Канал: ${channel.name} | ИИ: ${aiLabel()}\n`);
 
   // каналы, которые держат постоянное соединение (baileys), поднимаются здесь

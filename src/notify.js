@@ -11,6 +11,7 @@ import { recipients, getManager } from './calls.js';
 const ownerPhones = () => db.prepare("SELECT phone FROM managers WHERE role='owner' AND phone IS NOT NULL AND phone != ''")
   .all().map((m) => m.phone);
 import { scheduleSetting } from './schedule.js';
+import { logFailure } from './integrations.js';
 
 const LABELS = { service: 'Уборка', object_type: 'Объект', area_m2: 'Площадь', district: 'Где',
   address: 'Адрес', works: 'Что сделать', date: 'Когда', price_quote: 'Названа цена' };
@@ -42,7 +43,7 @@ export function handoffText(conv, reason) {
   const facts = Object.entries(LABELS)
     .filter(([k]) => lead[k])
     .map(([k, t]) => `${t}: ${lead[k]}${k === 'area_m2' ? ' м²' : ''}`);
-  const waiting = db.prepare('SELECT COUNT(*) n FROM conversations WHERE needs_human=1').get().n;
+  const waiting = db.prepare('SELECT COUNT(*) n FROM conversations WHERE needs_human=1 AND deleted_at IS NULL').get().n;
   const url = adminUrl();
   return [
     `🔔 Нужен менеджер — ${who}, +${conv.phone}`,
@@ -65,7 +66,10 @@ export async function notifyManagers(text, { convId = null, owners = false, mana
   if (!to.length) return false;
   for (const phone of to) {
     try { await channel.send({ phone, chat_id: null, channel: channel.name }, text); }
-    catch (e) { console.error('уведомление менеджеру не ушло:', e.message); }
+    catch (e) {
+      console.error('уведомление менеджеру не ушло:', e.message);
+      logFailure('notify', { target: phone, convId, payload: { text }, error: e.message, retry: true });
+    }
   }
   return true;
 }
@@ -90,6 +94,7 @@ export async function notifyHandoff(convId, reason) {
         await channel.send({ phone, chat_id: null, channel: channel.name }, text);
       } catch (e) {
         console.error('уведомление менеджеру не ушло:', e.message);
+        logFailure('notify', { target: phone, convId, payload: { text }, error: e.message, retry: true });
       }
     }
   } catch (e) {

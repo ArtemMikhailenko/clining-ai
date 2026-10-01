@@ -9,7 +9,8 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { db, getSetting, audit } from './db.js';
+import { db, getSetting, audit, logAccess } from './db.js';
+import { actorName } from './context.js';
 import { nextWorkStart } from './schedule.js';
 
 export const CALL_STATUS = {
@@ -30,9 +31,13 @@ const parseTime = (s) => (s ? new Date(String(s).replace(' ', 'T') + (/[zZ]|[+-]
 
 /* ─────────── Менеджеры ─────────── */
 
+// хэш пароля наружу не отдаём никогда — только признак, что вход заведён
 export const listManagers = () =>
-  db.prepare("SELECT * FROM managers ORDER BY role = 'owner' DESC, id").all();
-export const getManager = (id) => (id ? db.prepare('SELECT * FROM managers WHERE id=?').get(id) : null);
+  db.prepare(`SELECT id, name, phone, role, active, created_at, login, last_login_at,
+      (pass IS NOT NULL AND pass != '') AS can_login
+    FROM managers ORDER BY role = 'owner' DESC, id`).all();
+export const getManager = (id) => (id ? db.prepare(`SELECT id, name, phone, role, active, login, last_login_at,
+    (pass IS NOT NULL AND pass != '') AS can_login FROM managers WHERE id=?`).get(id) : null);
 export const cleanPhone = (v) => String(v || '').replace(/\D/g, '');
 
 export function saveManager(m) {
@@ -42,12 +47,25 @@ export function saveManager(m) {
   if (phone && phone.length < 9) throw new Error('Номер слишком короткий — с кодом страны, например 972501234567');
   const role = m.role === 'owner' ? 'owner' : 'manager';
   const active = m.active === false || m.active === 0 ? 0 : 1;
-  if (m.id) {
-    db.prepare('UPDATE managers SET name=?, phone=?, role=?, active=? WHERE id=?').run(name, phone || null, role, active, m.id);
-    return getManager(m.id);
+  const login = String(m.login ?? '').trim() || null;
+  if (login && !/^[\w.@-]{3,40}$/.test(login)) throw new Error('Логин — латиница, цифры, точка или дефис, от 3 символов');
+  if (login) {
+    const taken = db.prepare('SELECT id FROM managers WHERE lower(login)=lower(?) AND id != ?').get(login, m.id || 0);
+    if (taken) throw new Error(`Логин «${login}» уже занят`);
   }
-  const r = db.prepare('INSERT INTO managers(name, phone, role, active) VALUES(?,?,?,?)').run(name, phone || null, role, active);
-  return getManager(Number(r.lastInsertRowid));
+  const before = m.id ? getManager(m.id) : null;
+  if (m.id) {
+    db.prepare('UPDATE managers SET name=?, phone=?, role=?, active=?, login=? WHERE id=?')
+      .run(name, phone || null, role, active, login, m.id);
+  } else {
+    m.id = Number(db.prepare('INSERT INTO managers(name, phone, role, active, login) VALUES(?,?,?,?,?)')
+      .run(name, phone || null, role, active, login).lastInsertRowid);
+  }
+  // права и вход — то, что владелец потом захочет восстановить по журналу
+  if (before?.role !== role) audit('manager', m.id, 'role', before?.role ?? null, role, actorName('система'));
+  if ((before?.login ?? null) !== login) audit('manager', m.id, 'login', before?.login ?? null, login, actorName('система'));
+  if (!login) db.prepare('UPDATE managers SET pass=NULL WHERE id=?').run(m.id);
+  return getManager(m.id);
 }
 
 export function deleteManager(id) {
@@ -59,7 +77,7 @@ export function deleteManager(id) {
 /** Кому дать заявку: из принимающих — тому, у кого меньше ждущих звонка. */
 export function pickManager() {
   return db.prepare(`SELECT m.*, (SELECT count(*) FROM conversations c
-      WHERE c.manager_id = m.id AND c.call_due_at IS NOT NULL AND c.status != 'closed') AS load
+      WHERE c.manager_id = m.id AND c.call_due_at IS NOT NULL AND c.status != 'closed' AND c.deleted_at IS NULL) AS load
     FROM managers m WHERE m.active = 1 ORDER BY load, m.id LIMIT 1`).get() || null;
 }
 
@@ -67,8 +85,8 @@ export function pickManager() {
 export function recipients(convId, { owners = false, managerId = null } = {}) {
   const conv = convId ? db.prepare('SELECT manager_id FROM conversations WHERE id=?').get(convId) : null;
   const mine = getManager(managerId || conv?.manager_id);
-  const base = mine?.phone ? [mine] : db.prepare("SELECT * FROM managers WHERE active=1 AND phone IS NOT NULL AND phone != ''").all();
-  const extra = owners ? db.prepare("SELECT * FROM managers WHERE role='owner' AND phone IS NOT NULL AND phone != ''").all() : [];
+  const base = mine?.phone ? [mine] : db.prepare("SELECT phone FROM managers WHERE active=1 AND phone IS NOT NULL AND phone != ''").all();
+  const extra = owners ? db.prepare("SELECT phone FROM managers WHERE role='owner' AND phone IS NOT NULL AND phone != ''").all() : [];
   return [...new Set([...base, ...extra].map((m) => m.phone).filter(Boolean))];
 }
 
@@ -98,7 +116,7 @@ export function assignHandoff(convId, { actor = 'система', why = '' } = {
   return m;
 }
 
-export function setManager(convId, managerId, actor = 'менеджер') {
+export function setManager(convId, managerId, actor = actorName('менеджер')) {
   const conv = db.prepare('SELECT manager_id FROM conversations WHERE id=?').get(convId);
   if (!conv) throw new Error('Нет такой заявки');
   const m = managerId ? getManager(managerId) : null;
@@ -118,12 +136,53 @@ export function clearCallDue(convId, actor, why) {
 
 /* ─────────── Звонки ─────────── */
 
-export function listCalls(convId) {
-  return db.prepare(`SELECT k.*, m.name AS manager_name FROM calls k
+export function listCalls(convId, signer = null) {
+  const rows = db.prepare(`SELECT k.*, m.name AS manager_name FROM calls k
     LEFT JOIN managers m ON m.id = k.manager_id WHERE k.conv_id=? ORDER BY k.id DESC`).all(convId);
+  // имя файла наружу не отдаём: только подписанная ссылка на час (ТЗ §6.1)
+  for (const k of rows) {
+    k.rec_url = k.recording && !k.rec_deleted_at && signer ? signer(k.id) : null;
+    k.has_recording = Boolean(k.recording);
+    delete k.recording;
+  }
+  return rows;
 }
 
-export function logCall(convId, b, actor = 'менеджер') {
+/** Файл записи для выдачи: только живой, не удалённый. */
+export function recordingFile(callId) {
+  const k = db.prepare('SELECT * FROM calls WHERE id=?').get(callId);
+  if (!k?.recording || k.rec_deleted_at) return null;
+  const file = path.join(REC_DIR, path.basename(k.recording));
+  return fs.existsSync(file) ? { file, call: k } : null;
+}
+
+const TRASH = () => path.join(REC_DIR, '.trash');
+
+/** Удаление записи — мягкое: файл уходит в корзину, звонок и след в журнале остаются. */
+export function deleteRecording(callId, reason) {
+  const k = db.prepare('SELECT * FROM calls WHERE id=?').get(callId);
+  if (!k?.recording || k.rec_deleted_at) throw new Error('Записи нет');
+  if (!String(reason || '').trim()) throw new Error('Укажите причину удаления');
+  fs.mkdirSync(TRASH(), { recursive: true });
+  try { fs.renameSync(path.join(REC_DIR, k.recording), path.join(TRASH(), k.recording)); } catch {}
+  const who = actorName('система');
+  db.prepare("UPDATE calls SET rec_deleted_at=datetime('now'), rec_deleted_by=? WHERE id=?").run(who, callId);
+  audit('lead', k.conv_id, 'recording', `запись звонка #${callId}`, null, who, reason);
+  logAccess('recording_delete', { object: 'call', objectId: callId, detail: reason });
+}
+
+export function restoreRecording(callId) {
+  const k = db.prepare('SELECT * FROM calls WHERE id=?').get(callId);
+  if (!k?.rec_deleted_at) throw new Error('Запись не удалена');
+  const from = path.join(TRASH(), k.recording);
+  if (!fs.existsSync(from)) throw new Error('Файла уже нет: истёк срок хранения в корзине');
+  fs.renameSync(from, path.join(REC_DIR, k.recording));
+  db.prepare('UPDATE calls SET rec_deleted_at=NULL, rec_deleted_by=NULL WHERE id=?').run(callId);
+  audit('lead', k.conv_id, 'recording', null, `запись звонка #${callId}`, actorName('система'), 'восстановлена');
+  logAccess('recording_restore', { object: 'call', objectId: callId });
+}
+
+export function logCall(convId, b, actor = actorName('менеджер')) {
   const conv = db.prepare('SELECT * FROM conversations WHERE id=?').get(convId);
   if (!conv) throw new Error('Нет такой заявки');
   const status = String(b.status || '');
@@ -183,7 +242,17 @@ export function sweepRecordings() {
   return old.length;
 }
 
+/** Корзина записей: через 30 дней файл удаляется окончательно, отметка в звонке остаётся. */
+export function purgeTrash() {
+  const old = db.prepare(`SELECT id, recording FROM calls WHERE rec_deleted_at IS NOT NULL
+    AND recording IS NOT NULL AND rec_deleted_at < datetime('now', '-30 days')`).all();
+  for (const c of old) {
+    try { fs.rmSync(path.join(TRASH(), c.recording), { force: true }); } catch {}
+    db.prepare('UPDATE calls SET recording=NULL WHERE id=?').run(c.id);
+  }
+}
+
 /** Просроченные звонки, по которым ещё никого не предупредили. */
 export const overdueCalls = () => db.prepare(`SELECT * FROM conversations
   WHERE call_due_at IS NOT NULL AND call_due_at <= datetime('now')
-    AND call_escalated_at IS NULL AND status != 'closed'`).all();
+    AND call_escalated_at IS NULL AND status != 'closed' AND deleted_at IS NULL`).all();

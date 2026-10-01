@@ -8,6 +8,7 @@ import { withinWorkHours, scheduleSetting, sweepStale, workHours, isHoliday } fr
 import { quote } from './pricing.js';
 import { notifyHandoff } from './notify.js';
 import { assignHandoff } from './calls.js';
+import { logFailure } from './integrations.js';
 import { amountOf } from './stages.js';
 import { transcribe, sttConfigured } from './stt.js';
 import { analyzeVideo, duration, videoLimitMinutes } from './video.js';
@@ -237,7 +238,10 @@ async function processIncoming({ phone, name, text, wa_id, chat_id = null, media
   const hint = voices.length ? dominantLang(history(conv.id)) : '';
   for (const v of voices) {
     try { v.text = await transcribe(v.file, hint); }
-    catch (e) { console.error('расшифровка голосового:', e.message); }
+    catch (e) {
+      console.error('расшифровка голосового:', e.message);
+      logFailure('stt', { convId: conv.id, error: e.message });
+    }
   }
   const said = voices.map((v) => v.text).filter(Boolean).join('\n');
   const body = [text, said].filter(Boolean).join('\n');
@@ -360,6 +364,7 @@ async function respond(convId, ch, text) {
     });
   } catch (e) {
     console.error('ИИ не ответил:', e.message);
+    logFailure('ai', { convId: conv.id, error: e.message });
     const short = aiErrorText(e);
     lastAiError = { message: short, at: new Date().toISOString() };
     flagHuman(conv.id, short);
@@ -488,6 +493,7 @@ async function respond(convId, ch, text) {
       wa = (await adapterFor(fresh).send(fresh, body)).wa_id;
     } catch (e) {
       err = e.message;
+      logFailure('whatsapp', { target: fresh.phone, convId: conv.id, payload: { text: body }, error: e.message });
       flagHuman(conv.id, 'не отправилось в WhatsApp: ' + e.message);
     }
     const sent = addMessage(conv.id, { direction: 'out', author: 'ai', body, wa_id: wa, error: err });
@@ -531,6 +537,7 @@ async function sendInitiative(conv, kind, extra = {}) {
     return true;
   } catch (e) {
     console.error('напоминание не ушло:', e.message);
+    logFailure('whatsapp', { target: conv.phone, convId: conv.id, payload: { kind }, error: 'напоминание клиенту: ' + e.message });
     return false;
   }
 }
@@ -556,7 +563,7 @@ export async function runFollowUps() {
       (SELECT max(created_at) FROM messages m WHERE m.conv_id = c.id AND m.direction = 'in') AS last_in_at,
       (SELECT count(*) FROM messages m WHERE m.conv_id = c.id AND m.direction = 'in' AND m.media IS NOT NULL) AS media_count
     FROM conversations c
-    WHERE c.status != 'closed' AND c.nudge_stop = 0`).all();
+    WHERE c.status != 'closed' AND c.nudge_stop = 0 AND c.deleted_at IS NULL`).all();
 
   let sent = 0, changed = false;
   for (const conv of rows) {
@@ -690,7 +697,7 @@ export async function answerMissed() {
     SELECT c.*, (SELECT body FROM messages m WHERE m.conv_id = c.id AND m.direction = 'in'
                  ORDER BY m.id DESC LIMIT 1) AS last_in_body
     FROM conversations c
-    WHERE c.status != 'closed' AND c.ai_enabled = 1 AND c.needs_human = 0
+    WHERE c.status != 'closed' AND c.ai_enabled = 1 AND c.needs_human = 0 AND c.deleted_at IS NULL
       AND EXISTS (
         SELECT 1 FROM messages m WHERE m.conv_id = c.id AND m.direction = 'in'
           AND m.id > COALESCE((SELECT max(o.id) FROM messages o WHERE o.conv_id = c.id

@@ -67,9 +67,20 @@ const notifyReady = () => hasNotifications() && Notification.permission === 'gra
 
 const api = async (url, opts) => {
   const r = await fetch(url, { headers: { 'Content-Type': 'application/json' }, ...opts });
-  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
+  if (r.status === 401) {
+    location.href = '/login.html?next=' + encodeURIComponent(location.pathname + location.search + location.hash);
+    throw new Error('Нужно войти');
+  }
+  if (!r.ok) {
+    const j = await r.json().catch(() => ({}));
+    throw Object.assign(new Error(j.error || r.statusText), { data: j });
+  }
   return r.json();
 };
+// кто вошёл: владелец видит всё, менеджер — заявки без настроек и журналов
+const me = () => state.me || { role: 'owner', name: '' };
+const isOwner = () => me().role === 'owner';
+const ROLE_T = { owner: 'владелец', manager: 'менеджер' };
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c]));
 const dt = (s) => new Date(String(s).replace(' ', 'T') + 'Z');
 const hhmm = (s) => dt(s).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
@@ -927,7 +938,7 @@ function threadHtml(c) {
     if (d !== lastDay) { html += `<div class="daysep">${d}</div>`; lastDay = d; prev = null; }
     if (m.author === 'system') { html += `<div class="sys">${esc(m.body)}</div>`; prev = null; continue; }
     const grouped = prev && prev.author === m.author && (dt(m.created_at) - dt(prev.created_at)) < 12e4;
-    const who = { customer:'клиент', ai:'ИИ', human:'менеджер' }[m.author];
+    const who = m.author === 'human' ? (m.author_name || 'менеджер') : { customer:'клиент', ai:'ИИ' }[m.author];
     html += `<div class="row ${m.direction === 'out' ? 'out' : 'in'} ${m.author === 'human' ? 'byhuman' : ''} ${grouped ? 'grouped' : ''}">
       <div class="bub ${m.error ? 'err' : ''}" dir="auto">${mediaHtml(m)}${esc(m.body)}
         <div class="meta">${who} · ${hhmm(m.created_at)}${m.error ? ' · не доставлено' : ''}</div></div></div>`;
@@ -1164,10 +1175,60 @@ function bindNext(root, convId) {
   };
 }
 
+/* Единая история (ТЗ §4.2): что поменялось, кто и когда */
+const FIELD_T = { stage: 'Этап', deal_sum: 'Окончательная цена', paid_sum: 'Оплата', paid_at: 'Дата оплаты',
+  job_date: 'Дата работ', manager_id: 'Ответственный', call_due_at: 'Срок звонка', next_action: 'Следующее действие',
+  needs_human: 'Нужен менеджер', review: 'Пометка «проверить»', call: 'Звонок', source: 'Источник', deleted: 'Удаление',
+  recording: 'Запись разговора' };
+const LEAD_T = { service: 'Тип уборки', object_type: 'Объект', area_m2: 'Площадь', district: 'Район', address: 'Адрес',
+  date: 'Желаемая дата', name: 'Имя', price_quote: 'Оценка', works: 'Что сделать' };
+function histValue(field, v) {
+  if (v == null || v === '') return '—';
+  if (field === 'stage') {
+    const [st, cl] = String(v).split(':');
+    return cl ? 'Закрыто · ' + colTitle(cl) : colTitle(st) !== st ? colTitle(st) : v;
+  }
+  if (field === 'needs_human') return v === '1' ? 'да' : 'нет';
+  if (field === 'call_due_at' && /^\d{4}-\d{2}-\d{2} /.test(v)) return dayTime(v);
+  return v;
+}
+function timelineHtml(items) {
+  if (!items.length) return '<span class="muted">изменений пока не было</span>';
+  const when = (s) => dt(s).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+  return items.map((it) => {
+    let what = '';
+    if (it.type === 'change') {
+      const f = it.field.startsWith('lead.') ? LEAD_T[it.field.slice(5)] || it.field.slice(5) : FIELD_T[it.field] || it.field;
+      what = it.field === 'call' ? `<b>${esc(f)}: ${esc(it.new)}</b>`
+        : it.field === 'stage' && it.who === 'перенос' ? `перенос в новую воронку → <b>${esc(histValue('stage', it.new))}</b>`
+        : `${esc(f)}: ${esc(histValue(it.field, it.old))} → <b>${esc(histValue(it.field, it.new))}</b>`;
+    } else if (it.type === 'call') {
+      what = `<b>Звонок: ${esc(it.status)}</b>${it.duration ? ` · ${Math.round(it.duration / 60)} мин` : ''}${it.outcome ? ` — ${esc(it.outcome)}` : ''}`
+        + (it.rec_url ? `<audio controls preload="none" src="${esc(it.rec_url)}"></audio>` : it.rec_deleted ? `<em>${esc(it.rec_deleted)}</em>` : '');
+    } else if (it.type === 'event') {
+      what = esc(it.text);
+    } else {
+      what = `<span class="hist-msg ${it.dir}" dir="auto">${esc(String(it.text || '').slice(0, 240))}</span>`;
+    }
+    return `<div class="hist-row ${it.type}"><span class="hist-when">${when(it.at)}</span>
+      <span class="hist-what">${what}<small>${esc(it.who || '')}${it.reason ? ' · ' + esc(it.reason) : ''}</small></span></div>`;
+  }).join('');
+}
+
 /** Предупреждения карточки (ТЗ §7, §8.3): что нарушено и что посмотреть. */
 function warnHtml(c) {
   const list = (c.warn || []).filter((w) => w.code !== 'late');
   return list.length ? `<div class="warns">${list.map((w) => `<span class="warn-i ${w.level}">${esc(w.text)}</span>`).join('')}</div>` : '';
+}
+
+/** Чужая или ничья заявка: менеджер сначала берёт её себе — это видно в журнале. */
+function takeHtml(c) {
+  const u = me();
+  if (u.role !== 'manager' || !u.id || c.manager_id === u.id || c.stage === 'closed') return '';
+  const foreign = Boolean(c.manager_id);
+  return `<div class="take-note ${foreign ? 'foreign' : ''}"><span>${foreign
+    ? `Заявку ведёт <b>${esc(mgrName(c.manager_id) || 'другой менеджер')}</b>. Менять её может он или владелец.`
+    : 'У заявки нет ответственного.'}</span><button class="btn sm primary" data-a="take">Взять себе</button></div>`;
 }
 
 /** Ответственный и звонки (ТЗ §4.1, §6): первый экран карточки, а не вкладка. */
@@ -1208,7 +1269,10 @@ function callsListHtml(rows) {
       k.duration_sec ? ' · ' + Math.round(k.duration_sec / 60) + ' мин' : ''}</span></div>
     ${k.outcome ? `<div class="call-o" dir="auto">${esc(k.outcome)}</div>` : ''}
     ${k.next_call_at ? `<div class="call-n">следующий звонок: ${dayTime(k.next_call_at)}</div>` : ''}
-    ${k.recording ? `<audio controls preload="none" src="/media/calls/${encodeURIComponent(k.recording)}"></audio>`
+    ${k.rec_url ? `<audio controls preload="none" src="${esc(k.rec_url)}"></audio>${isOwner()
+        ? `<button class="linkbtn" data-recdel="${k.id}">удалить запись</button>` : ''}`
+      : k.rec_deleted_at ? `<div class="call-n">запись удалена · ${esc(k.rec_deleted_by || '')}${isOwner()
+        ? ` <button class="linkbtn" data-recback="${k.id}">вернуть</button>` : ''}</div>`
       : k.no_record_reason ? `<div class="call-n">без записи: ${esc(k.no_record_reason)}</div>` : ''}
   </div>`).join('');
 }
@@ -1216,6 +1280,15 @@ function callsListHtml(rows) {
 const REC_MIME = { mp3: 'audio/mpeg', m4a: 'audio/mp4', wav: 'audio/wav', ogg: 'audio/ogg', oga: 'audio/ogg', opus: 'audio/ogg' };
 
 function bindCalls(root, convId) {
+  const take = root.querySelector('[data-a="take"]');
+  if (take) take.onclick = async () => {
+    try {
+      await api(`/api/conversations/${convId}/manager`, { method: 'POST', body: JSON.stringify({ manager_id: me().id }) });
+      toast('Заявка ваша');
+      loadList();
+      openConv(convId, drawerOpen);
+    } catch (e) { toast(e.message, true); }
+  };
   const mgr = root.querySelector('[data-r="mgr"]');
   if (mgr) mgr.onchange = async () => {
     try {
@@ -1225,7 +1298,26 @@ function bindCalls(root, convId) {
     } catch (e) { toast(e.message); }
   };
   const list = root.querySelector('[data-r="calls"]');
-  const draw = (rows) => { if (list) list.innerHTML = callsListHtml(rows); };
+  const draw = (rows) => {
+    if (!list) return;
+    list.innerHTML = callsListHtml(rows);
+    $$('[data-recdel]', list).forEach((b) => b.onclick = async () => {
+      const reason = prompt('Почему удаляете запись? Файл можно вернуть в течение 30 дней');
+      if (!reason) return;
+      try {
+        await api(`/api/calls/${b.dataset.recdel}/recording`, { method: 'DELETE', body: JSON.stringify({ reason }) });
+        toast('Запись удалена');
+        api(`/api/conversations/${convId}/calls`).then(draw);
+      } catch (e) { toast(e.message, true); }
+    });
+    $$('[data-recback]', list).forEach((b) => b.onclick = async () => {
+      try {
+        await api(`/api/calls/${b.dataset.recback}/recording/restore`, { method: 'POST', body: '{}' });
+        toast('Запись возвращена');
+        api(`/api/conversations/${convId}/calls`).then(draw);
+      } catch (e) { toast(e.message, true); }
+    });
+  };
   if (list) api(`/api/conversations/${convId}/calls`).then(draw).catch(() => {});
 
   const form = root.querySelector('[data-r="callf"]');
@@ -1303,6 +1395,7 @@ function leadHtml(c) {
       <a class="btn" href="tel:+${esc(c.phone)}">${ico('<path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1.9.4 1.8.7 2.7a2 2 0 0 1-.5 2.1L8 9.8a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.7.7a2 2 0 0 1 1.7 2z"/>')}Позвонить</a>
       <a class="btn" href="https://wa.me/${esc(c.phone)}" target="_blank" rel="noopener">${ico('<path d="M3 21l1.6-4.7A8.5 8.5 0 1 1 8 19.6z"/>')}WhatsApp</a>
     </div>
+    ${takeHtml(c)}
     <div class="sect note top"><h4>Заметка менеджера<button class="btn ghost sm" data-a="note-add">+ запись</button></h4>
       <textarea data-r="note" dir="auto" rows="4" placeholder="О чём договорились, что обещали, чем закончилось. Видна только вам">${esc(c.note || '')}</textarea></div>
     ${nextHtml(c)}
@@ -1343,7 +1436,9 @@ function leadHtml(c) {
     ${thumbs ? `<div class="sect"><h4>Фото от клиента (${photos.length})</h4><div class="thumbs">${thumbs}</div></div>` : ''}
     ${rooms ? `<div class="sect"><h4>Что видно на фото</h4>${rooms}</div>` : ''}
     ${c.summary ? `<div class="sect"><h4>Суть</h4><div class="quote" dir="auto">${esc(c.summary)}</div></div>` : ''}
-    <div class="sect"><h4>История этапов</h4><div class="hist" data-r="hist">загружаем…</div></div>
+    <div class="sect"><h4>История<label class="hist-msgs"><input type="checkbox" data-r="hist-msgs"> с перепиской</label></h4>
+      <div class="hist" data-r="hist">загружаем…</div></div>
+    ${isOwner() ? '<div class="danger-zone"><button class="linkbtn danger" data-a="lead-delete">Удалить заявку</button></div>' : ''}
   </div>`;
 }
 
@@ -1367,19 +1462,25 @@ function bindLead(root, convId) {
     openConv(convId, drawerOpen);
   };
   const hist = root.querySelector('[data-r="hist"]');
-  if (hist) api(`/api/conversations/${convId}/audit`).then((rows) => {
-    const label = (v) => {
-      if (!v) return '—';
-      const [st, cl] = String(v).split(':');
-      return cl ? 'Закрыто · ' + colTitle(cl) : colTitle(st) !== st ? colTitle(st) : v;
-    };
-    const stageRows = rows.filter((r) => r.field === 'stage');
-    hist.innerHTML = stageRows.length ? stageRows.map((r) => `<div class="hist-row">
-        <span class="hist-when">${dt(r.at).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}</span>
-        <span class="hist-what">${r.actor === 'перенос' ? 'перенос в новую воронку →' : esc(label(r.old_value)) + ' →'} <b>${esc(label(r.new_value))}</b>
-          <small>${esc(r.actor)}${r.reason ? ' · ' + esc(r.reason) : ''}</small></span></div>`).join('')
-      : '<span class="muted">изменений пока не было</span>';
-  }).catch(() => { hist.textContent = ''; });
+  const histMsgs = root.querySelector('[data-r="hist-msgs"]');
+  const loadHist = () => hist && api(`/api/conversations/${convId}/timeline${histMsgs?.checked ? '?messages=1' : ''}`)
+    .then((items) => { hist.innerHTML = timelineHtml(items); })
+    .catch(() => { hist.textContent = ''; });
+  if (histMsgs) histMsgs.onchange = loadHist;
+  loadHist();
+  const del = root.querySelector('[data-a="lead-delete"]');
+  if (del) del.onclick = async () => {
+    const reason = prompt('Почему удаляете заявку? Она пропадёт из работы, но останется в журнале — её можно вернуть в Настройки → Журнал');
+    if (!reason) return;
+    try {
+      await api(`/api/conversations/${convId}/delete`, { method: 'POST', body: JSON.stringify({ reason }) });
+      toast('Заявка удалена');
+      current = null;
+      closeDrawer();
+      loadList();
+      if (page === 'inbox') PAGES.inbox.render();
+    } catch (e) { toast(e.message, true); }
+  };
   const ta = root.querySelector('[data-r="note"]');
   if (ta) ta.onblur = async () => {
     await api(`/api/conversations/${convId}/note`, { method: 'POST', body: JSON.stringify({ note: ta.value }) });
@@ -1409,6 +1510,12 @@ function bindLead(root, convId) {
   if (form) form.onsubmit = async (e) => {
     e.preventDefault();
     const body = Object.fromEntries(new FormData(form).entries());
+    // источник — атрибуция рекламы: без причины сервер правку не примет
+    if ('source' in body && body.source.trim() !== String(detail.source || '')) {
+      const why = prompt('Почему меняете источник? Прежнее значение останется в истории');
+      if (!why) return;
+      body.source_reason = why;
+    }
     try {
       detail = { ...detail, ...(await api(`/api/conversations/${convId}/lead`, { method: 'POST', body: JSON.stringify(body) })) };
       detail.messages = detail.messages || [];
@@ -1553,8 +1660,8 @@ function ctlRow(r) {
     <td class="num">${first ? t(r.first_call_at) : '<span class="bad">нет</span>'}</td>
     <td class="num ${late ? 'bad' : ''}">${r.sla_min != null ? r.sla_min + ' мин' : '—'}</td>
     <td>${r.source_url ? `<a href="${esc(r.source_url)}" target="_blank" rel="noopener">${esc(r.source || 'реклама')}</a>` : esc(r.source || '—')}${r.campaign ? `<small dir="auto">${esc(r.campaign)}</small>` : ''}</td>
-    <td>${esc(r.call_status || '—')}${r.calls > 1 ? `<small>попыток: ${r.calls}</small>` : ''}${r.recording
-      ? `<audio controls preload="none" src="/media/calls/${encodeURIComponent(r.recording)}"></audio>` : ''}</td>
+    <td>${esc(r.call_status || '—')}${r.calls > 1 ? `<small>попыток: ${r.calls}</small>` : ''}${r.rec_url
+      ? `<audio controls preload="none" src="${esc(r.rec_url)}"></audio>` : ''}</td>
     <td>${esc(r.stage)}</td>
     <td class="num">${r.price ? r.price.toLocaleString('ru-RU') + ' ₪' + (r.price_final ? '' : '<small>оценка бота</small>') : '—'}</td>
     <td class="num">${esc(r.job_date || '—')}</td>
@@ -1581,12 +1688,67 @@ const SET_SECTIONS = [
     i:'<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.8-3.5 3.4-5.5 6.5-5.5s5.7 2 6.5 5.5"/><path d="M16 4.6a3.5 3.5 0 0 1 0 6.8M18.5 14.8c1.6.8 2.7 2.6 3 5.2"/>' },
   { k:'ads', t:'Реклама', d:'кампании и метки',
     i:'<path d="M3 11v2a1 1 0 0 0 1 1h3l5 4V6L7 10H4a1 1 0 0 0-1 1z"/><path d="M16 9a4 4 0 0 1 0 6"/><path d="M19 6a8 8 0 0 1 0 12"/>' },
+  { k:'logs', t:'Журнал', d:'изменения, входы, сбои',
+    i:'<path d="M8 4h11a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H8"/><path d="M4 4h4v16H4z"/><path d="M12 9h5M12 13h5M12 17h3"/>' },
   { k:'data', t:'Данные', d:'сброс перед рекламой',
     i:'<ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>' },
   { k:'conn', t:'Подключения', d:'WhatsApp, модель, QR',
     i:'<path d="M9 2v6M15 2v6M6 8h12v4a6 6 0 0 1-12 0zM12 18v4"/>' }
 ];
 let setSection = 'company';
+let logTab = 'audit';
+
+const ACCESS_T = { login: 'вход', login_failed: 'неудачный вход', logout: 'выход', recording_listen: 'прослушал запись',
+  recording_delete: 'удалил запись', recording_restore: 'вернул запись', lead_delete: 'удалил заявку', lead_restore: 'вернул заявку',
+  backup_export: 'скачал резервную копию', data_reset: 'стёр данные', password_set: 'задал пароль' };
+const KIND_T = { notify: 'уведомление команде', whatsapp: 'сообщение клиенту', ai: 'модель ИИ', stt: 'расшифровка голоса' };
+const STATUS_T = { retry: 'повторяем', done: 'доставлено повторно', failed: 'не удалось' };
+
+async function loadLogs(q = '') {
+  const box = $('#f-logs');
+  if (!box) return;
+  const when = (s) => dt(s).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+  const who = (name, phone) => esc(name || (phone ? '+' + phone : ''));
+  try {
+    if (logTab === 'audit') {
+      const rows = await api('/api/logs/audit' + (q ? '?q=' + encodeURIComponent(q) : ''));
+      box.innerHTML = rows.length ? `<table class="log-t"><tbody>${rows.map((a) => {
+        const f = a.field.startsWith('lead.') ? LEAD_T[a.field.slice(5)] || a.field.slice(5) : FIELD_T[a.field] || a.field;
+        return `<tr data-conv="${a.entity === 'lead' ? a.entity_id : ''}"><td class="num">${when(a.at)}</td><td>${esc(a.actor)}</td>
+          <td>${a.entity === 'lead' ? who(a.conv_name, a.conv_phone) || '#' + a.entity_id : 'менеджер #' + a.entity_id}</td>
+          <td>${esc(f)}: ${esc(histValue(a.field, a.old_value))} → <b>${esc(histValue(a.field, a.new_value))}</b>${a.reason ? `<small>${esc(a.reason)}</small>` : ''}</td></tr>`;
+      }).join('')}</tbody></table>` : '<div class="empty">Ничего не найдено</div>';
+      $$('tr[data-conv]', box).forEach((tr) => tr.dataset.conv && (tr.onclick = () => { current = Number(tr.dataset.conv); go('inbox'); }));
+    } else if (logTab === 'access') {
+      const rows = await api('/api/logs/access');
+      box.innerHTML = rows.length ? `<table class="log-t"><tbody>${rows.map((a) => `<tr class="${a.action === 'login_failed' ? 'bad' : ''}">
+        <td class="num">${when(a.at)}</td><td>${esc(a.user_name || '—')}</td><td>${esc(ACCESS_T[a.action] || a.action)}</td>
+        <td>${a.object === 'call' ? 'звонок #' + a.object_id : a.object === 'lead' ? 'заявка #' + a.object_id : ''}${a.detail ? ` <small>${esc(a.detail)}</small>` : ''}</td>
+        <td class="num muted">${esc(a.ip || '')}</td></tr>`).join('')}</tbody></table>` : '<div class="empty">Записей нет</div>';
+    } else if (logTab === 'failures') {
+      const rows = await api('/api/logs/failures');
+      box.innerHTML = rows.length ? `<table class="log-t"><tbody>${rows.map((a) => `<tr class="${a.status === 'failed' ? 'bad' : ''}">
+        <td class="num">${when(a.at)}</td><td>${esc(KIND_T[a.kind] || a.kind)}${a.target ? `<small>+${esc(a.target)}</small>` : ''}</td>
+        <td>${a.conv_id ? who(a.conv_name, a.conv_phone) : ''}</td><td>${esc(a.error)}<small>попыток: ${a.attempts}</small></td>
+        <td>${esc(STATUS_T[a.status] || a.status)}${a.kind === 'notify' && a.status === 'failed' ? ` <button class="btn ghost sm" data-retry="${a.id}">Повторить</button>` : ''}</td></tr>`).join('')}</tbody></table>`
+        : '<div class="empty">Сбоев не было</div>';
+      $$('[data-retry]', box).forEach((b) => b.onclick = async () => {
+        try { await api(`/api/logs/failures/${b.dataset.retry}/retry`, { method: 'POST', body: '{}' }); toast('Повторим в течение минуты'); loadLogs(); }
+        catch (e) { toast(e.message, true); }
+      });
+    } else {
+      const rows = await api('/api/conversations/deleted');
+      box.innerHTML = rows.length ? `<table class="log-t"><tbody>${rows.map((c) => `<tr>
+        <td class="num">${when(c.deleted_at)}</td><td>${who(lead(c).name || c.name, c.phone)}</td><td>${esc(c.deleted_by || '')}</td>
+        <td>${esc(c.delete_reason || '')}</td><td><button class="btn ghost sm" data-restore="${c.id}">Вернуть</button></td></tr>`).join('')}</tbody></table>`
+        : '<div class="empty">Удалённых заявок нет</div>';
+      $$('[data-restore]', box).forEach((b) => b.onclick = async () => {
+        try { await api(`/api/conversations/${b.dataset.restore}/restore`, { method: 'POST', body: '{}' }); toast('Заявка возвращена'); loadList(); loadLogs(); }
+        catch (e) { toast(e.message, true); }
+      });
+    }
+  } catch (e) { box.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+}
 let setDirtyFlag = false;
 const DAY_FULL = ['Воскресенье', 'Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота'];
 const OFF_MODES = [
@@ -1608,10 +1770,13 @@ const unit = (id, val, suffix, min, max) =>
 const mgrRow = (m) => `<div class="mgr-row" data-id="${m.id || ''}">
   <input type="text" class="m-name" value="${esc(m.name || '')}" placeholder="Имя">
   <input type="tel" class="m-phone mono" value="${m.phone ? '+' + esc(m.phone) : ''}" placeholder="+972 50 123 4567">
+  <input type="text" class="m-login mono" value="${esc(m.login || '')}" placeholder="логин" autocapitalize="none" spellcheck="false">
+  <input type="password" class="m-pass" placeholder="${m.can_login ? 'новый пароль' : 'задать пароль'}" autocomplete="new-password">
   <select class="m-role"><option value="manager" ${m.role !== 'owner' ? 'selected' : ''}>менеджер</option>
     <option value="owner" ${m.role === 'owner' ? 'selected' : ''}>владелец</option></select>
   <label class="switch" title="принимает заявки"><input type="checkbox" class="m-active" ${m.active === 0 ? '' : 'checked'}><span>принимает заявки</span></label>
-  <button class="btn ghost sm m-del" title="Удалить">✕</button></div>`;
+  <button class="btn ghost sm m-del" title="Удалить">✕</button>
+  <small class="m-seen">${m.can_login ? `вход есть${m.last_login_at ? ' · последний ' + dayTime(m.last_login_at) : ' · ещё не входил'}` : m.id ? 'входа нет: задайте логин и пароль' : ''}</small></div>`;
 let mgrGone = new Set();
 
 function setDirty(v) {
@@ -1620,6 +1785,11 @@ function setDirty(v) {
 }
 
 function renderSettings() {
+  if (!isOwner()) {
+    $('#pg-sub').textContent = '';
+    $('#content').innerHTML = '<div class="empty" style="padding:60px 20px">Настройки доступны владельцу</div>';
+    return;
+  }
   $('#pg-sub').textContent = 'применяются сразу, без перезапуска';
   const s = state;
   const cur = SET_SECTIONS.find((x) => x.k === setSection);
@@ -1719,8 +1889,8 @@ function renderSettings() {
           `<input type="text" id="f-adminurl" value="${esc(s.admin_url || '')}" placeholder="https://clining-ai.onrender.com">`))
     },
     team: {
-      lead: 'Заявку, которую бот передал человеку, получает менеджер из этого списка — тот, у кого сейчас меньше ждущих звонка. Ему же уходят уведомления. Владельцу приходят просрочки.',
-      body: grp('Список', 'Номер — с кодом страны, на него придут уведомления в WhatsApp. «Принимает заявки» выключите на время отпуска: новые заявки пойдут другим.',
+      lead: 'Заявку, которую бот передал человеку, получает менеджер из этого списка — тот, у кого сейчас меньше ждущих звонка. Ему же уходят уведомления. Владельцу приходят просрочки и вечерний отчёт.',
+      body: grp('Список', 'Номер — с кодом страны, на него придут уведомления в WhatsApp. Логин и пароль — для входа в CRM под своим именем; пароль хранится зашифрованным, посмотреть его нельзя, только задать новый. «Владелец» видит настройки и журналы, «менеджер» — только заявки. «Принимает заявки» выключите на время отпуска.',
           `<div id="f-team" class="team">${(s.managers || []).map(mgrRow).join('')}</div>
            <div class="team-add"><button class="btn ghost sm" id="f-addmgr">+ Добавить</button></div>`)
         + grp('Срок первого звонка', 'После передачи у заявки появляется срок «позвонить до». Ночью и в выходные отсчёт начинается с открытия рабочего дня. Просрочка подсвечивается красным, и о ней пишут ответственному и владельцу.',
@@ -1733,6 +1903,13 @@ function renderSettings() {
           + srow('Ждём фото/видео', 'Сколько ждать материал, прежде чем пометить заявку.', unit('f-mediawait', s.media_wait_hours ?? 24, 'часов', 1, 720))
           + srow('Вечерний отчёт владельцу', 'За 15 минут до конца рабочего дня: сколько передано, обзвонено, что не закрыто. Приходит тем, у кого в списке выше роль «владелец».',
             `<label class="switch"><input type="checkbox" id="f-evening" ${s.evening_report ? 'checked' : ''}></label>`))
+    },
+    logs: {
+      lead: 'Кто что менял, кто входил и слушал записи, какие сообщения не ушли. Удалённые заявки возвращаются отсюда.',
+      body: `<div class="seg logs-seg">${[['audit', 'Изменения'], ['access', 'Доступ'], ['failures', 'Сбои'], ['deleted', 'Удалённые']]
+        .map(([k, t]) => `<button data-log="${k}" class="${logTab === k ? 'on' : ''}">${t}</button>`).join('')}</div>
+        ${logTab === 'audit' ? '<input type="search" id="log-q" class="log-q" placeholder="поиск: имя, телефон, поле, значение">' : ''}
+        <div id="f-logs" class="logs">загружаем…</div>`
     },
     ads: {
       lead: 'Клик по рекламе в Facebook или Instagram приносит вместе с первым сообщением карточку объявления: заголовок, ссылку и id клика. Название кампании из рекламного кабинета WhatsApp не передаёт — его задаёт справочник ниже.',
@@ -1796,6 +1973,12 @@ function renderSettings() {
     priceExample();
   }
   if ($('#f-hours')) renderHourRows(state.work_hours || {});
+  if ($('#f-logs')) {
+    $$('[data-log]').forEach((b) => b.onclick = () => { logTab = b.dataset.log; renderSettings(); });
+    let t;
+    $('#log-q') && ($('#log-q').oninput = (e) => { clearTimeout(t); t = setTimeout(() => loadLogs(e.target.value), 300); });
+    loadLogs();
+  }
   $$('.opt').forEach((o) => o.onclick = () => {
     $$('.opt').forEach((x) => x.classList.toggle('on', x === o));
     $('#f-off').value = o.dataset.v;
@@ -1952,7 +2135,8 @@ async function saveSettings() {
   put('#f-sla', 'call_sla_min'); put('#f-recmax', 'rec_max_mb'); put('#f-reckeep', 'rec_keep_days');
   // менеджеры — отдельные записи: сначала проверяем все, потом сохраняем
   const rows = $$('.mgr-row').map((r) => ({ id: Number(r.dataset.id) || undefined, name: r.querySelector('.m-name').value.trim(),
-    phone: r.querySelector('.m-phone').value, role: r.querySelector('.m-role').value, active: r.querySelector('.m-active').checked }));
+    phone: r.querySelector('.m-phone').value, role: r.querySelector('.m-role').value, active: r.querySelector('.m-active').checked,
+    login: r.querySelector('.m-login').value.trim(), password: r.querySelector('.m-pass').value }));
   if (rows.some((m) => !m.name && m.phone)) return toast('У менеджера нужно имя');
   for (const id of mgrGone) await api(`/api/managers/${id}`, { method: 'DELETE' });
   try {
@@ -2007,6 +2191,35 @@ async function loadState() {
   const h = $('#tb-hours');
   h.className = 'sf-row ' + (state.working_now ? 'ok' : 'bad');
   h.querySelector('span:last-child').textContent = state.working_now ? 'Рабочее время' : 'Нерабочее время';
+  applyRole();
+}
+
+/** Что видно по роли (ТЗ §4.3): менеджеру не показываем настройки и тестовый симулятор. */
+function applyRole() {
+  const owner = isOwner();
+  $$('a[data-p="settings"], #nav-sim').forEach((a) => { a.hidden = !owner; });
+  const box = $('#sf-me');
+  if (!box) return;
+  const u = me();
+  box.hidden = !u.name;
+  box.innerHTML = `<div class="me-row"><span class="ava">${esc((u.name || '?').slice(0, 1))}</span>
+      <span class="me-n"><b>${esc(u.name)}</b><small>${ROLE_T[u.role] || ''}</small></span></div>
+    <div class="me-acts">${u.id ? '<button class="btn ghost sm" id="me-pass">Пароль</button>' : ''}
+      ${state.me_auth !== false ? '<button class="btn ghost sm" id="me-out">Выйти</button>' : ''}</div>`;
+  $('#me-out') && ($('#me-out').onclick = async () => {
+    await fetch('/api/logout', { method: 'POST' }).catch(() => {});
+    location.href = '/login.html';
+  });
+  $('#me-pass') && ($('#me-pass').onclick = async () => {
+    const old = prompt('Текущий пароль');
+    if (old == null) return;
+    const pw = prompt('Новый пароль, минимум 6 символов');
+    if (!pw) return;
+    try {
+      await api('/api/me/password', { method: 'POST', body: JSON.stringify({ old, password: pw }) });
+      toast('Пароль изменён. На других устройствах нужно войти заново');
+    } catch (e) { toast(e.message, true); }
+  });
 }
 
 /** Автоматика не должна отваливаться молча — это главная претензия
