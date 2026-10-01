@@ -8,6 +8,7 @@ import { withinWorkHours, scheduleSetting, sweepStale, workHours, isHoliday } fr
 import { quote } from './pricing.js';
 import { notifyHandoff } from './notify.js';
 import { assignHandoff } from './calls.js';
+import { amountOf } from './stages.js';
 import { transcribe, sttConfigured } from './stt.js';
 import { analyzeVideo, duration, videoLimitMinutes } from './video.js';
 import { isStopRequest, cadence, missingFor, touchGoal, jitterMinutes, confirmHours, settings as nudgeSettings } from './followups.js';
@@ -405,7 +406,7 @@ async function respond(convId, ch, text) {
   }
   const q = quote(lead);
   if (q) {
-    const told = Number(String(lead.price_quote || '').replace(/[^\d]/g, ''));
+    const told = amountOf(lead.price_quote);
     if (!told || told > q.total * 2) lead.price_quote = `${q.total.toLocaleString('ru-RU')} ${q.currency}`;
   }
   db.prepare('UPDATE conversations SET lead=?, summary=?, status=CASE WHEN status=\'new\' THEN \'ai\' ELSE status END WHERE id=?')
@@ -595,7 +596,24 @@ export async function runFollowUps() {
 
       // 2. Диалог у менеджера: клиенту от бота не пишем, напоминаем менеджеру
       if (byManager) {
-        if (conv.last_dir === 'out' && silent >= cfg.managerPing && !recently(conv.mgr_ping_at, 72)) {
+        // бот обещал клиенту написать в этот день, а диалог уже у менеджера:
+        // сам бот в чужую переписку не лезет, обещание выполняет менеджер
+        if (conv.followup_at && conv.followup_at <= today) {
+          const who = lead.name || conv.name || `+${conv.phone}`;
+          const ok = await notifyManagers(`📌 Сегодня обещали написать клиенту: ${who}`
+            + `${conv.followup_note ? `\n${conv.followup_note}` : ''}\n${adminLink(conv.id)}`, { convId: conv.id });
+          if (ok) {
+            db.prepare('UPDATE conversations SET followup_at=NULL, followup_note=NULL WHERE id=?').run(conv.id);
+            changed = true;
+          }
+          continue;
+        }
+        // клиент сам назвал срок («через две недели»), есть дата работ, действие
+        // или звонок по сроку — тишина ожидаемая, менеджера не дёргаем
+        const later = (d) => d && String(d).slice(0, 10) > today;
+        const expected = later(conv.followup_at) || later(lead.date_iso) || later(conv.job_date)
+          || later(conv.next_action_at) || conv.call_due_at;
+        if (!expected && conv.last_dir === 'out' && silent >= cfg.managerPing && !recently(conv.mgr_ping_at, 72)) {
           const who = lead.name || conv.name || `+${conv.phone}`;
           const ok = await notifyManagers(`⏳ Диалог молчит ${Math.round(silent)} ч — ${who}`
             + `${lead.price_quote ? `, названа цена ${lead.price_quote}` : ''}\n${adminLink(conv.id)}`, { convId: conv.id });
