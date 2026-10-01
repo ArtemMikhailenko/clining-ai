@@ -86,6 +86,21 @@ export function withinWorkHours(at = new Date()) {
 }
 
 /**
+ * Ближайший момент, когда менеджер на работе: сейчас, если окно открыто,
+ * иначе начало следующего окна (ТЗ §2.2). Шагаем по 5 минут, затем уточняем
+ * до минуты — две недели вперёд хватит на любые праздники.
+ */
+export function nextWorkStart(at = new Date()) {
+  if (withinWorkHours(at)) return at;
+  let t = at.getTime();
+  const limit = t + 14 * 864e5;
+  while (t < limit && !withinWorkHours(new Date(t))) t += 5 * 6e4;
+  if (t >= limit) return at;                       // графика нет вовсе — не выдумываем
+  while (withinWorkHours(new Date(t - 6e4))) t -= 6e4;
+  return new Date(Math.floor(t / 6e4) * 6e4);
+}
+
+/**
  * Сколько рабочих секунд прошло между двумя моментами. Ночь, выходные и
  * праздники не считаем: иначе письмо в 23:10 и ответ в 08:05 выглядят как
  * девять часов молчания, и метрика скорости ответа теряет смысл.

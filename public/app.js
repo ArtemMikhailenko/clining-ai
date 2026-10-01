@@ -125,12 +125,26 @@ function columnOf(c) {
 }
 const colTitle = (k) => (ALL_COLS.find((x) => x.k === k) || { t: k }).t;
 
-let flagFilter = null;   // 'need' | 'review' — признаки, по которым смотрят очередь
+let flagFilter = null;   // 'need' | 'review' | 'call' | 'late' — признаки, по которым смотрят очередь
+// звонок по заявке (ТЗ §2.2): ждём — до срока, просрочен — после
+const callState = (c) => (!c.call_due_at || c.status === 'closed' ? null : dt(c.call_due_at) <= Date.now() ? 'late' : 'call');
+const dayTime = (s) => {
+  const d = dt(s), today = new Date();
+  const t = d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+  return d.toDateString() === today.toDateString() ? t
+    : d.toLocaleDateString('ru-RU', { weekday: 'short', day: 'numeric', month: 'numeric' }) + ' ' + t;
+};
+const lateBy = (s) => {
+  const m = Math.max(0, Math.round((Date.now() - dt(s)) / 6e4));
+  return m < 60 ? m + ' мин' : m < 1440 ? Math.floor(m / 60) + ' ч' : Math.floor(m / 1440) + ' дн';
+};
+const mgrName = (id) => (state.managers || []).find((m) => m.id === id)?.name || '';
 const matches = (c) => {
   // на доске чужие колонки только приглушаются, фильтрует лишь список
   if (stageFilter && leadView === 'list' && columnOf(c) !== stageFilter) return false;
   if (flagFilter === 'need' && !(c.needs_human && c.status !== 'closed')) return false;
   if (flagFilter === 'review' && !c.review) return false;
+  if ((flagFilter === 'call' || flagFilter === 'late') && callState(c) !== flagFilter) return false;
   const q = query.trim().toLowerCase();
   if (!q) return true;
   return (c.name || '').toLowerCase().includes(q) || String(c.phone).includes(q)
@@ -161,6 +175,9 @@ function chipFor(c) {
   const chips = [];
   if (c.needs_human) chips.push('<span class="chip need">нужен менеджер</span>');
   else chips.push(c.ai_enabled ? '<span class="chip ai">ИИ ведёт</span>' : '<span class="chip human">менеджер</span>');
+  const cs = callState(c);
+  if (cs === 'late') chips.push(`<span class="chip late" title="срок был ${dayTime(c.call_due_at)}">звонок просрочен ${lateBy(c.call_due_at)}</span>`);
+  if (cs === 'call') chips.push(`<span class="chip call">позвонить до ${dayTime(c.call_due_at)}</span>`);
   if (c.wait_media) chips.push('<span class="chip wait">ждём фото/видео</span>');
   if (c.stage === 'done' && !c.paid_sum) chips.push('<span class="chip wait">ожидается оплата</span>');
   if (c.review) chips.push(`<span class="chip review" title="${esc(c.review)}">проверить</span>`);
@@ -651,7 +668,7 @@ function cardHtml(c) {
 
 function subLine(n) {
   const el = $('#pg-sub');
-  const flagT = { need: 'нужен менеджер', review: 'проверить после переноса' }[flagFilter];
+  const flagT = { need: 'нужен менеджер', review: 'проверить после переноса', call: 'позвонить', late: 'звонок просрочен' }[flagFilter];
   el.innerHTML = `${n} ${plural(n, 'заявка', 'заявки', 'заявок')}`
     + (stageFilter ? ` · ${esc(colTitle(stageFilter))}` : '')
     + (flagT ? ` · ${flagT}` : '')
@@ -709,11 +726,15 @@ function renderFunnel() {
   // очереди по признакам: ради «нужен менеджер» менеджер и открывает CRM
   const needN = convs.filter((c) => c.needs_human && c.status !== 'closed').length;
   const reviewN = convs.filter((c) => c.review).length;
+  const lateN = convs.filter((c) => callState(c) === 'late').length;
+  const callN = convs.filter((c) => callState(c) === 'call').length;
   const wip = Number(state.wip_need) || 0;
-  const flagRow = (k, t, n, c, alert) => `<a class="frow flag ${flagFilter === k ? 'on' : ''} ${n ? '' : 'zero'} ${alert ? 'alert' : ''}"
+  const flagRow = (k, t, n, c, alert, tone = '') => `<a class="frow flag ${tone} ${flagFilter === k ? 'on' : ''} ${n ? '' : 'zero'} ${alert ? 'alert' : ''}"
       data-flag="${k}"><span class="fdot" style="--c:${c}"></span><span class="lbl">${t}</span>
       <span class="fn">${n}${k === 'need' && wip && n > wip ? ' / ' + wip : ''}</span></a>`;
   box.innerHTML = `<div class="fbar">${bar}</div>`
+  + flagRow('late', 'Звонок просрочен', lateN, 'var(--danger)', lateN > 0, 'danger')
+  + flagRow('call', 'Позвонить', callN, 'var(--s1)', false)
   + flagRow('need', 'Нужен менеджер', needN, 'var(--warn)', needN > 0)
   + (reviewN ? flagRow('review', 'Проверить после переноса', reviewN, 'var(--s5)', false) : '')
   + '<div class="fsep"></div>'
@@ -1061,6 +1082,113 @@ function isCold(c) {
     && (Date.now() - dt(c.last_at)) > 864e5;
 }
 
+/** Ответственный и звонки (ТЗ §4.1, §6): первый экран карточки, а не вкладка. */
+function callHtml(c) {
+  const cs = callState(c);
+  const ms = state.managers || [];
+  const st = state.call_status || {};
+  const local = (d) => new Date(d.getTime() - d.getTimezoneOffset() * 6e4).toISOString().slice(0, 16);
+  const tomorrow = new Date(); tomorrow.setDate(tomorrow.getDate() + 1); tomorrow.setHours(10, 0, 0, 0);
+  return `<div class="callbox ${cs || ''}">
+    <div class="kv"><dt>Ответственный</dt><dd><select data-r="mgr"><option value="">не назначен</option>${ms.map((m) =>
+      `<option value="${m.id}" ${c.manager_id === m.id ? 'selected' : ''}>${esc(m.name)}${m.active ? '' : ' (не принимает)'}</option>`).join('')}
+      ${c.manager_id && !ms.some((m) => m.id === c.manager_id) ? '<option selected>удалён</option>' : ''}</select></dd></div>
+    ${c.assigned_at ? `<div class="kv"><dt>Передано</dt><dd>${dayTime(c.assigned_at)}</dd></div>` : ''}
+    ${cs ? `<div class="kv due"><dt>Позвонить до</dt><dd>${dayTime(c.call_due_at)}${cs === 'late' ? ` <span class="late-tag">просрочено ${lateBy(c.call_due_at)}</span>` : ''}</dd></div>` : ''}
+    <div class="call-acts"><button class="btn sm ${cs ? 'primary' : ''}" data-a="call">Записать звонок</button></div>
+    <form class="callf" data-r="callf" hidden>
+      <div class="cf-row"><label>Итог</label><select name="status">${Object.entries(st).map(([k, t]) =>
+        `<option value="${k}">${esc(t)}</option>`).join('')}</select></div>
+      <div class="cf-row"><label>Длительность</label><div class="unit"><input type="number" name="duration_min" min="0" max="300" step="1"><span>мин</span></div></div>
+      <div class="cf-row"><label>О чём договорились</label><textarea name="outcome" rows="2" dir="auto"></textarea></div>
+      <div class="cf-row"><label>Следующий звонок</label><input type="datetime-local" name="next_call_at" data-default="${local(tomorrow)}"></div>
+      <div class="cf-row" data-only="answered"><label>Запись разговора</label><input type="file" name="rec" accept=".mp3,.m4a,.wav,.ogg,audio/*"></div>
+      <div class="cf-row" data-only="answered"><label>Нет записи, потому что</label><input type="text" name="no_record_reason" placeholder="например, звонил с личного номера"></div>
+      <div class="cf-hint" data-r="cfhint"></div>
+      <div class="cf-acts"><button type="button" class="btn ghost sm" data-a="callcancel">Отмена</button>
+        <button type="submit" class="btn primary sm">Сохранить звонок</button></div>
+    </form>
+    <div class="calls" data-r="calls"></div>
+  </div>`;
+}
+
+function callsListHtml(rows) {
+  const st = state.call_status || {};
+  if (!rows.length) return '<span class="muted">звонков ещё не было</span>';
+  return rows.map((k) => `<div class="call-item ${k.status}">
+    <div class="call-h"><b>${esc(st[k.status] || k.status)}</b><span>${dayTime(k.at)}${k.manager_name ? ' · ' + esc(k.manager_name) : ''}${
+      k.duration_sec ? ' · ' + Math.round(k.duration_sec / 60) + ' мин' : ''}</span></div>
+    ${k.outcome ? `<div class="call-o" dir="auto">${esc(k.outcome)}</div>` : ''}
+    ${k.next_call_at ? `<div class="call-n">следующий звонок: ${dayTime(k.next_call_at)}</div>` : ''}
+    ${k.recording ? `<audio controls preload="none" src="/media/calls/${encodeURIComponent(k.recording)}"></audio>`
+      : k.no_record_reason ? `<div class="call-n">без записи: ${esc(k.no_record_reason)}</div>` : ''}
+  </div>`).join('');
+}
+
+const REC_MIME = { mp3: 'audio/mpeg', m4a: 'audio/mp4', wav: 'audio/wav', ogg: 'audio/ogg', oga: 'audio/ogg', opus: 'audio/ogg' };
+
+function bindCalls(root, convId) {
+  const mgr = root.querySelector('[data-r="mgr"]');
+  if (mgr) mgr.onchange = async () => {
+    try {
+      await api(`/api/conversations/${convId}/manager`, { method: 'POST', body: JSON.stringify({ manager_id: Number(mgr.value) || null }) });
+      toast(mgr.value ? 'Ответственный: ' + mgrName(Number(mgr.value)) : 'Ответственный снят');
+      loadList();
+    } catch (e) { toast(e.message); }
+  };
+  const list = root.querySelector('[data-r="calls"]');
+  const draw = (rows) => { if (list) list.innerHTML = callsListHtml(rows); };
+  if (list) api(`/api/conversations/${convId}/calls`).then(draw).catch(() => {});
+
+  const form = root.querySelector('[data-r="callf"]');
+  const btn = root.querySelector('[data-a="call"]');
+  if (!form || !btn) return;
+  const hint = form.querySelector('[data-r="cfhint"]');
+  const sync = () => {
+    const v = form.status.value;
+    form.querySelectorAll('[data-only]').forEach((x) => { x.hidden = x.dataset.only !== v; });
+    const needNext = ['no_answer', 'busy', 'callback'].includes(v);
+    if (needNext && !form.next_call_at.value) form.next_call_at.value = form.next_call_at.dataset.default;
+    hint.textContent = needNext ? 'Без даты следующего звонка не сохранится — иначе заявка потеряется.'
+      : v === 'answered' ? 'Прикрепите запись или напишите, почему её нет.' : '';
+  };
+  form.status.onchange = sync;
+  btn.onclick = () => { form.hidden = !form.hidden; if (!form.hidden) { sync(); form.status.focus(); } };
+  root.querySelector('[data-a="callcancel"]').onclick = () => { form.reset(); form.hidden = true; };
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const save = form.querySelector('[type=submit]');
+    save.disabled = true;
+    try {
+      let recording = null;
+      const file = form.status.value === 'answered' ? form.rec.files[0] : null;
+      if (file) {
+        save.textContent = 'Загружаем запись…';
+        const ext = (file.name.split('.').pop() || '').toLowerCase();
+        const r = await fetch('/api/recordings', { method: 'POST',
+          headers: { 'content-type': REC_MIME[ext] || file.type || 'application/octet-stream' }, body: file });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(j.error || 'Запись не загрузилась');
+        recording = j.file;
+      }
+      const next = form.next_call_at.value ? new Date(form.next_call_at.value).toISOString() : null;
+      const out = await api(`/api/conversations/${convId}/calls`, { method: 'POST', body: JSON.stringify({
+        status: form.status.value, duration_min: form.duration_min.value, outcome: form.outcome.value,
+        next_call_at: next, recording, no_record_reason: form.status.value === 'answered' ? form.no_record_reason.value : '',
+        manager_id: Number(mgr?.value) || null }) });
+      toast('Звонок записан');
+      draw(out.calls);
+      form.reset(); form.hidden = true;
+      loadList();
+      openConv(convId, drawerOpen);
+    } catch (err) {
+      toast(err.message);
+    } finally {
+      save.disabled = false; save.textContent = 'Сохранить звонок';
+    }
+  };
+}
+
 // ТЗ §4.1: без этих полей менеджеру нечего обсуждать по телефону — пропуски видны сразу
 const MUST = { district: 'Город / район', object_type: 'Объект', area_m2: 'Площадь, м²', service: 'Тип уборки', date: 'Желаемая дата' };
 function gapsHtml(c) {
@@ -1115,6 +1243,7 @@ function leadHtml(c) {
     ${c.close_reason === 'lost' && c.lost_reason ? `<div class="kv"><dt>Причина</dt><dd dir="auto">${esc(c.lost_reason)}</dd></div>` : ''}
     ${c.status !== 'closed' ? `<div class="kv"><dt>Нужен менеджер</dt><dd>
       <label class="switch"><input type="checkbox" data-r="need" ${c.needs_human ? 'checked' : ''}></label></dd></div>` : ''}
+    ${callHtml(c)}
     <div class="kv"><dt>Телефон</dt><dd>+${esc(c.phone)}</dd></div>
     <div class="kv"><dt>Имя</dt><dd dir="auto">${esc(l.name || c.name || '—')}</dd></div>
     <div class="kv"><dt>Записан на</dt><dd>${c.job_date
@@ -1146,6 +1275,7 @@ function leadHtml(c) {
 }
 
 function bindLead(root, convId) {
+  bindCalls(root, convId);
   const col = root.querySelector('[data-r="col"]');
   if (col) col.onchange = async () => {
     if (!(await moveTo(convId, col.value))) col.value = columnOf(convs.find((x) => x.id === convId) || {});
@@ -1296,6 +1426,8 @@ const SET_SECTIONS = [
     i:'<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>' },
   { k:'access', t:'Доступ', d:'чёрный список, уведомления',
     i:'<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/>' },
+  { k:'team', t:'Менеджеры', d:'кто звонит и в какой срок',
+    i:'<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.8-3.5 3.4-5.5 6.5-5.5s5.7 2 6.5 5.5"/><path d="M16 4.6a3.5 3.5 0 0 1 0 6.8M18.5 14.8c1.6.8 2.7 2.6 3 5.2"/>' },
   { k:'ads', t:'Реклама', d:'кампании и метки',
     i:'<path d="M3 11v2a1 1 0 0 0 1 1h3l5 4V6L7 10H4a1 1 0 0 0-1 1z"/><path d="M16 9a4 4 0 0 1 0 6"/><path d="M19 6a8 8 0 0 1 0 12"/>' },
   { k:'data', t:'Данные', d:'сброс перед рекламой',
@@ -1321,6 +1453,15 @@ const srow = (label, help, control) => `<div class="srow"><div class="sl"><label
 const swide = (control) => `<div class="srow wide"><div class="sc">${control}</div></div>`;
 const unit = (id, val, suffix, min, max) =>
   `<div class="unit"><input type="number" id="${id}" min="${min}" max="${max}" value="${esc(String(val))}"><span>${suffix}</span></div>`;
+
+const mgrRow = (m) => `<div class="mgr-row" data-id="${m.id || ''}">
+  <input type="text" class="m-name" value="${esc(m.name || '')}" placeholder="Имя">
+  <input type="tel" class="m-phone mono" value="${m.phone ? '+' + esc(m.phone) : ''}" placeholder="+972 50 123 4567">
+  <select class="m-role"><option value="manager" ${m.role !== 'owner' ? 'selected' : ''}>менеджер</option>
+    <option value="owner" ${m.role === 'owner' ? 'selected' : ''}>владелец</option></select>
+  <label class="switch" title="принимает заявки"><input type="checkbox" class="m-active" ${m.active === 0 ? '' : 'checked'}><span>принимает заявки</span></label>
+  <button class="btn ghost sm m-del" title="Удалить">✕</button></div>`;
+let mgrGone = new Set();
 
 function setDirty(v) {
   setDirtyFlag = v;
@@ -1420,13 +1561,22 @@ function renderSettings() {
         + srow('Уведомления в браузере', 'Всплывающее уведомление, когда бот передаёт диалог человеку.',
           `<button class="btn" id="f-notify">${notifyReady() ? 'Уведомления включены'
             : hasNotifications() ? 'Включить уведомления' : 'Браузер не поддерживает'}</button>`))
-      + grp('Уведомления менеджеру в WhatsApp', 'Когда бот передаёт заявку человеку, на эти номера придёт сообщение: кто написал, что за объект, причина передачи и ссылка на диалог. Шлёт тот же номер, на котором работает бот.',
-        srow('Номера менеджеров', 'По одному на строку и обязательно с кодом страны: «+972 50 123 4567». Без кода страны сообщение не дойдёт. Пусто — не слать.',
-          `<textarea id="f-managers" class="mono" rows="3" placeholder="+972 50 123 4567">${esc(s.manager_numbers || '')}</textarea>`)
-        + srow('Слать уведомления', 'Можно временно выключить, не стирая номера.',
+      + grp('Уведомления менеджеру в WhatsApp', 'Когда бот передаёт заявку человеку, ответственному менеджеру придёт сообщение: кто написал, что за объект, причина и до какого времени позвонить. Список менеджеров и их номера — на вкладке «Менеджеры».',
+        srow('Слать уведомления', 'Можно временно выключить, не стирая номера.',
           `<label class="switch"><input type="checkbox" id="f-notifyon" ${s.notify_on ? 'checked' : ''}></label>`)
         + srow('Адрес админки', 'Для ссылки на диалог в уведомлении. На Render подставляется сам.',
           `<input type="text" id="f-adminurl" value="${esc(s.admin_url || '')}" placeholder="https://clining-ai.onrender.com">`))
+    },
+    team: {
+      lead: 'Заявку, которую бот передал человеку, получает менеджер из этого списка — тот, у кого сейчас меньше ждущих звонка. Ему же уходят уведомления. Владельцу приходят просрочки.',
+      body: grp('Список', 'Номер — с кодом страны, на него придут уведомления в WhatsApp. «Принимает заявки» выключите на время отпуска: новые заявки пойдут другим.',
+          `<div id="f-team" class="team">${(s.managers || []).map(mgrRow).join('')}</div>
+           <div class="team-add"><button class="btn ghost sm" id="f-addmgr">+ Добавить</button></div>`)
+        + grp('Срок первого звонка', 'После передачи у заявки появляется срок «позвонить до». Ночью и в выходные отсчёт начинается с открытия рабочего дня. Просрочка подсвечивается красным, и о ней пишут ответственному и владельцу.',
+          srow('Позвонить в течение', '', unit('f-sla', s.call_sla_min ?? 5, 'минут', 1, 240)))
+        + grp('Записи разговоров', 'Запись прикрепляют к звонку в карточке: MP3, M4A, WAV или OGG. Слушать могут только те, кто входит в админку.',
+          srow('Размер файла до', '', unit('f-recmax', s.rec_max_mb ?? 50, 'МБ', 1, 200))
+          + srow('Хранить', '0 — хранить всегда. Старые записи удаляются, сам звонок в истории остаётся.', unit('f-reckeep', s.rec_keep_days ?? 0, 'дней', 0, 3650)))
     },
     ads: {
       lead: 'Клик по рекламе в Facebook или Instagram приносит вместе с первым сообщением карточку объявления: заголовок, ссылку и id клика. Название кампании из рекламного кабинета WhatsApp не передаёт — его задаёт справочник ниже.',
@@ -1530,6 +1680,17 @@ function renderSettings() {
     $('#i-led').className = 'led ' + cls;
     $('#i-me').textContent = waState.me ? '+' + waState.me : '—';
   }
+  mgrGone = new Set();
+  const bindMgr = (row) => { row.querySelector('.m-del').onclick = () => {
+    if (row.dataset.id) mgrGone.add(Number(row.dataset.id));
+    row.remove(); setDirty(true);
+  }; };
+  $$('.mgr-row').forEach(bindMgr);
+  $('#f-addmgr') && ($('#f-addmgr').onclick = () => {
+    $('#f-team').insertAdjacentHTML('beforeend', mgrRow({ role: 'manager', active: 1 }));
+    const row = $('#f-team').lastElementChild;
+    bindMgr(row); row.querySelector('.m-name').focus(); setDirty(true);
+  });
   $('#f-reset').onclick = () => renderSettings();
   $('#f-save').onclick = saveSettings;
 }
@@ -1602,7 +1763,7 @@ async function saveSettings() {
   put('#f-nudgestale', 'nudge_stale_hours'); put('#f-nudgeh', 'nudge_hours'); put('#f-nudgerep', 'nudge_repeat_hours'); put('#f-nudgemax', 'nudge_max');
   if ($('#f-nudgeon')) body.nudge_on = $('#f-nudgeon').checked;
   if ($$('.f-media').length) body.media_required = $$('.f-media').filter((x) => x.checked).map((x) => x.dataset.v).join(', ');
-  put('#f-managers', 'manager_numbers'); put('#f-adminurl', 'admin_url'); put('#f-sourcemap', 'source_map');
+  put('#f-adminurl', 'admin_url'); put('#f-sourcemap', 'source_map');
   put('#f-effort', 'ai_effort');
   if ($('#f-notifyon')) body.notify_on = $('#f-notifyon').checked;
   put('#f-prompt', 'system_prompt'); put('#f-blocked', 'blocked_numbers'); put('#f-quick', 'quick_replies');
@@ -1630,8 +1791,18 @@ async function saveSettings() {
     })).filter((x) => x.name && x.rate);
     body.price_list = JSON.stringify(pl, null, 2);
   }
+  put('#f-sla', 'call_sla_min'); put('#f-recmax', 'rec_max_mb'); put('#f-reckeep', 'rec_keep_days');
+  // менеджеры — отдельные записи: сначала проверяем все, потом сохраняем
+  const rows = $$('.mgr-row').map((r) => ({ id: Number(r.dataset.id) || undefined, name: r.querySelector('.m-name').value.trim(),
+    phone: r.querySelector('.m-phone').value, role: r.querySelector('.m-role').value, active: r.querySelector('.m-active').checked }));
+  if (rows.some((m) => !m.name && m.phone)) return toast('У менеджера нужно имя');
+  for (const id of mgrGone) await api(`/api/managers/${id}`, { method: 'DELETE' });
+  try {
+    for (const m of rows.filter((x) => x.name)) await api('/api/managers', { method: 'POST', body: JSON.stringify(m) });
+  } catch (e) { return toast(e.message); }
   await api('/api/state', { method: 'POST', body: JSON.stringify(body) });
   await loadState();
+  if (setSection === 'team') renderSettings();
   setDirty(false);
   toast('Настройки сохранены');
 }

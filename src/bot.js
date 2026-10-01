@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import { withinWorkHours, scheduleSetting, sweepStale, workHours, isHoliday } from './schedule.js';
 import { quote } from './pricing.js';
 import { notifyHandoff } from './notify.js';
+import { assignHandoff } from './calls.js';
 import { transcribe, sttConfigured } from './stt.js';
 import { analyzeVideo, duration, videoLimitMinutes } from './video.js';
 import { isStopRequest, cadence, missingFor, touchGoal, jitterMinutes, confirmHours, settings as nudgeSettings } from './followups.js';
@@ -136,11 +137,12 @@ function workableDay(iso) {
 }
 
 function flagHuman(convId, reason) {
-  notifyHandoff(convId, reason);            // менеджер должен узнать сразу, а не из админки
   // ai_enabled=0 обязательно: иначе бот молчит (status=human), а интерфейс
   // показывает «Перехватить», и вернуть ИИ нечем
   db.prepare("UPDATE conversations SET needs_human=1, handoff_reason=?, status='human', ai_enabled=0 WHERE id=?")
     .run(reason, convId);
+  assignHandoff(convId, { actor: 'бот', why: reason });   // ответственный и срок звонка (ТЗ §2.2)
+  notifyHandoff(convId, reason);            // менеджер должен узнать сразу, а не из админки
 }
 
 /**
@@ -342,6 +344,7 @@ async function respond(convId, ch, text) {
   if (offHours && mode === 'silent') {
     db.prepare("UPDATE conversations SET needs_human=1, handoff_reason='пришло в нерабочее время' WHERE id=?")
       .run(conv.id);
+    assignHandoff(conv.id, { why: 'пришло в нерабочее время' });   // срок — к открытию
     emit('conversations', null);
     return;
   }
@@ -578,7 +581,7 @@ export async function runFollowUps() {
             // диалог ведёт человек — подтверждает он сам, бот не лезет в его переписку
             ? await notifyManagers(`📅 ${when === 'eve' ? 'Завтра' : 'Сегодня'} уборка: ${who}`
               + `${lead.district ? `, ${lead.district}` : ''}${conv.job_time ? `, ${conv.job_time}` : ''}`
-              + `\nПодтвердите с клиентом: ${adminLink(conv.id)}`)
+              + `\nПодтвердите с клиентом: ${adminLink(conv.id)}`, { convId: conv.id })
             : await sendInitiative(conv, 'confirm', { when, date: conv.job_date, time: conv.job_time || '', outside: sinceIn > 24 });
           if (ok) { mark(); changed = true; if (!byManager) sent++; }
           continue;
@@ -590,7 +593,7 @@ export async function runFollowUps() {
         if (conv.last_dir === 'out' && silent >= cfg.managerPing && !recently(conv.mgr_ping_at, 72)) {
           const who = lead.name || conv.name || `+${conv.phone}`;
           const ok = await notifyManagers(`⏳ Диалог молчит ${Math.round(silent)} ч — ${who}`
-            + `${lead.price_quote ? `, названа цена ${lead.price_quote}` : ''}\n${adminLink(conv.id)}`);
+            + `${lead.price_quote ? `, названа цена ${lead.price_quote}` : ''}\n${adminLink(conv.id)}`, { convId: conv.id });
           if (ok) {
             db.prepare("UPDATE conversations SET mgr_ping_at = datetime('now') WHERE id=?").run(conv.id);
             changed = true;
@@ -607,7 +610,7 @@ export async function runFollowUps() {
         // менеджер просил напомнить себе — клиенту бот в этот день не пишет
         const who = lead.name || conv.name || `+${conv.phone}`;
         const ok = await notifyManagers(`🔔 Сегодня напомнить: ${who}`
-          + `${conv.followup_note ? `\n${conv.followup_note}` : ''}\n${adminLink(conv.id)}`);
+          + `${conv.followup_note ? `\n${conv.followup_note}` : ''}\n${adminLink(conv.id)}`, { convId: conv.id });
         if (ok) {
           db.prepare('UPDATE conversations SET followup_at=NULL, followup_note=NULL WHERE id=?').run(conv.id);
           changed = true;

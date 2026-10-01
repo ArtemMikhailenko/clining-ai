@@ -99,7 +99,42 @@ db.exec(`CREATE TABLE IF NOT EXISTS audit_log (
 );
 CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_log(entity, entity_id, id);`);
 
-// Воронка по ТЗ §3: этап сделки отдельно от того, кто ведёт диалог
+// Менеджеры (ТЗ §2, §4.1). Владелец — тоже строка: ему уходят эскалации,
+// а заявки он получает, только если сам отмечен «принимает заявки».
+db.exec(`CREATE TABLE IF NOT EXISTS managers (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  name       TEXT NOT NULL,
+  phone      TEXT,
+  role       TEXT NOT NULL DEFAULT 'manager',     -- manager | owner
+  active     INTEGER NOT NULL DEFAULT 1,           -- принимает новые заявки
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+)`);
+
+// Звонки (ТЗ §6): каждая попытка отдельной строкой, с итогом и записью
+db.exec(`CREATE TABLE IF NOT EXISTS calls (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  conv_id      INTEGER NOT NULL,
+  manager_id   INTEGER,
+  at           TEXT NOT NULL DEFAULT (datetime('now')),
+  status       TEXT NOT NULL,          -- answered | no_answer | busy | wrong | callback
+  duration_sec INTEGER,
+  outcome      TEXT,
+  next_call_at TEXT,
+  recording    TEXT,                   -- файл в data/media/calls
+  no_record_reason TEXT,
+  due_at       TEXT,                   -- какой срок закрывала попытка: для отчёта о скорости
+  actor        TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_calls_conv ON calls(conv_id, id);`);
+
+// Передача менеджеру: ответственный, когда передали, до какого времени позвонить
+if (!cols.includes('manager_id')) {
+  db.exec('ALTER TABLE conversations ADD COLUMN manager_id INTEGER');
+  db.exec('ALTER TABLE conversations ADD COLUMN assigned_at TEXT');
+  db.exec('ALTER TABLE conversations ADD COLUMN call_due_at TEXT');       // пусто — звонить не нужно
+  db.exec('ALTER TABLE conversations ADD COLUMN call_escalated_at TEXT'); // просрочку уже разослали
+}
+
 const needStages = !cols.includes('stage');
 if (needStages) {
   db.exec('ALTER TABLE conversations ADD COLUMN stage TEXT');
@@ -289,6 +324,11 @@ seed.run('notify_on', '1');
 seed.run('admin_url', '');
 // справочник кампаний: «ключ = Название». Ключ ищется в объявлении и первом сообщении
 seed.run('source_map', '');
+// ТЗ §2.2: срок первого звонка после передачи, минут
+seed.run('call_sla_min', '5');
+// записи разговоров: предел размера файла и срок хранения (0 — хранить всегда)
+seed.run('rec_max_mb', '50');
+seed.run('rec_keep_days', '0');
 // ТЗ §2.1: для каких видов уборки фото/видео обязательны. Без них заявка
 // остаётся в «Уточнении» с флагом «Ждём фото/видео»
 seed.run('media_required', 'после ремонта, перед въездом, после выезда, генеральная');
@@ -389,6 +429,16 @@ if (needStages) {
   if (before !== after) console.error('ВНИМАНИЕ: количество заявок до и после переноса не совпадает');
 }
 
+// Номера из старого поля «Номера менеджеров» становятся менеджерами.
+// Один раз: если список уже заводили руками, ничего не трогаем.
+if (!db.prepare('SELECT count(*) n FROM managers').get().n) {
+  const old = db.prepare("SELECT value FROM settings WHERE key='manager_numbers'").get()?.value || '';
+  const phones = [...new Set(old.split(/[,;\n]+/).map((n) => n.replace(/\D/g, '')).filter((n) => n.length >= 9))];
+  phones.forEach((ph, i) => db.prepare('INSERT INTO managers(name, phone) VALUES(?, ?)')
+    .run(phones.length > 1 ? `Менеджер ${i + 1}` : 'Менеджер', ph));
+  if (phones.length) console.log(`Менеджеры: перенесено ${phones.length} номеров из настроек`);
+}
+
 export const getSetting = (k) =>
   db.prepare('SELECT value FROM settings WHERE key = ?').get(k)?.value ?? null;
 
@@ -475,7 +525,8 @@ export function applyStage(convId, next, { close = null, lostReason = null, acto
     lost_reason: next === 'closed' && close === 'lost' ? String(lostReason).trim() : null,
     archive: next === 'closed' ? ARCHIVE_OF[close] : null
   };
-  if (next === 'closed') { set.status = 'closed'; set.needs_human = 0; }
+  // закрытую заявку обзванивать не нужно — срок звонка снимаем вместе с флагом
+  if (next === 'closed') { set.status = 'closed'; set.needs_human = 0; set.call_due_at = null; set.call_escalated_at = null; }
   else if (c.status === 'closed') set.status = 'human';
   const keys = Object.keys(set);
   db.prepare(`UPDATE conversations SET ${keys.map((k) => `${k}=?`).join(',')} WHERE id=?`)
@@ -489,7 +540,7 @@ export function resetData() {
   const convs = db.prepare('SELECT count(*) n FROM conversations').get().n;
   const msgs = db.prepare('SELECT count(*) n FROM messages').get().n;
   const jobs = db.prepare('SELECT count(*) n FROM jobs').get().n;
-  db.exec('DELETE FROM messages; DELETE FROM conversations; DELETE FROM jobs; DELETE FROM audit_log;');
+  db.exec('DELETE FROM messages; DELETE FROM conversations; DELETE FROM jobs; DELETE FROM audit_log; DELETE FROM calls;');
   try { db.exec("DELETE FROM sqlite_sequence WHERE name IN ('messages','conversations','jobs')"); } catch {}
   let files = 0;
   const mediaDir = path.join(dir, 'media');

@@ -152,6 +152,7 @@ button,input,textarea,select{font:inherit;color:inherit}
 /* признаки (кто ведёт, что проверить) отделены от этапов воронки чертой */
 .fsep{height:var(--hair);background:var(--border);margin:6px 10px}
 .frow.flag .fdot{border-radius:2px}
+.frow.danger.alert .fn{background:var(--danger)}
 
 .side-foot{margin-top:auto;padding-top:16px;display:flex;flex-direction:column;gap:8px}
 .side-card{background:var(--surface);border:var(--hair) solid var(--border);border-radius:var(--r-lg);
@@ -242,6 +243,10 @@ header .sub{color:var(--muted);font-size:12.5px;margin-top:2px;letter-spacing:0}
 .chip.closed{opacity:.7}
 .chip.closed::before{background:var(--muted)}
 .chip.wait::before{background:var(--s1)}
+.chip.call{color:var(--human);border-color:color-mix(in srgb,var(--human) 30%,transparent);background:var(--human-soft)}
+.chip.call::before{background:var(--human)}
+.chip.late{color:var(--danger);border-color:color-mix(in srgb,var(--danger) 32%,transparent);background:var(--danger-soft);font-weight:520}
+.chip.late::before{background:var(--danger)}
 .chip.review{background:color-mix(in srgb,var(--s5) 12%,transparent);color:var(--s5);border-color:color-mix(in srgb,var(--s5) 30%,transparent)}
 .chip.review::before{background:var(--s5)}
 .ava{width:26px;height:26px;border-radius:50%;flex:none;display:grid;place-items:center;
@@ -1115,6 +1120,45 @@ button,a,.lrow,.card,.frow{-webkit-tap-highlight-color:transparent;touch-action:
 .hist-what{color:var(--text-2);min-width:0}
 .hist-what b{color:var(--text);font-weight:540}
 .hist-what small{display:block;color:var(--muted);font-size:11.5px;margin-top:1px}
+/* звонки в карточке: ответственный, срок, журнал */
+.callbox{display:flex;flex-direction:column;margin:2px 0 10px;padding:4px 0 10px;border-bottom:var(--hair) solid var(--border-soft)}
+.kv.due dd{font-weight:520;font-variant-numeric:tabular-nums}
+.callbox.late .kv.due dt,.callbox.late .kv.due dd{color:var(--danger)}
+.late-tag{display:inline-block;margin-left:4px;font-size:11px;padding:0 6px;border-radius:6px;background:var(--danger-soft);color:var(--danger)}
+.call-acts{display:flex;gap:8px;margin:6px 0 2px}
+.callf{display:flex;flex-direction:column;gap:9px;margin:8px 0 4px;padding:12px;border-radius:var(--r-md);
+  background:var(--surface-2);border:var(--hair) solid var(--border)}
+.callf[hidden]{display:none}
+.cf-row{display:flex;flex-direction:column;gap:4px}
+.cf-row[hidden]{display:none}
+.cf-row label{font-size:11.5px;color:var(--muted)}
+.cf-row select,.cf-row input[type=text],.cf-row input[type=datetime-local],.cf-row textarea{font:inherit;font-size:13px;color:var(--text);
+  background:var(--surface);border:var(--hair) solid var(--border);border-radius:var(--r-sm,6px);padding:5px 8px;width:100%;box-sizing:border-box}
+.cf-row input[type=file]{font-size:12px;max-width:100%}
+.cf-hint{font-size:11.5px;color:var(--warn);min-height:0}
+.cf-hint:empty{display:none}
+.cf-acts{display:flex;justify-content:flex-end;gap:8px}
+.calls{display:flex;flex-direction:column;gap:8px;margin-top:8px;font-size:12.5px}
+.call-item{display:flex;flex-direction:column;gap:3px;padding-left:9px;border-left:2px solid var(--border)}
+.call-item.answered{border-left-color:var(--green)}
+.call-item.no_answer,.call-item.busy{border-left-color:var(--warn)}
+.call-h{display:flex;flex-wrap:wrap;gap:4px 8px;align-items:baseline}
+.call-h b{font-weight:540}
+.call-h span,.call-n{color:var(--muted);font-size:11.5px;font-variant-numeric:tabular-nums}
+.call-o{color:var(--text-2)}
+.call-item audio{width:100%;max-width:320px;height:32px;margin-top:2px}
+/* настройки → менеджеры */
+.team{display:flex;flex-direction:column;gap:8px}
+.mgr-row{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(0,1.3fr) auto auto auto;gap:8px;align-items:center}
+.mgr-row input[type=text],.mgr-row input[type=tel],.mgr-row select{width:100%;min-width:0;box-sizing:border-box;background:var(--surface);
+  border:var(--hair) solid color-mix(in srgb,var(--text) 16%,transparent);border-radius:var(--r-md);padding:7px 10px;
+  outline:none;font:inherit;font-size:13.5px;color:var(--text)}
+.mgr-row input:focus,.mgr-row select:focus{border-color:var(--accent);box-shadow:var(--ring)}
+.mgr-row .switch span{font-size:12px;color:var(--text-2);white-space:nowrap}
+.team-add{margin-top:10px}
+@media (max-width:720px){
+  .mgr-row{grid-template-columns:1fr 1fr;padding-bottom:10px;border-bottom:var(--hair) solid var(--border-soft)}
+}
 </style>
 </head>
 <body>

@@ -13,7 +13,9 @@ import { withinWorkHours, scheduleSetting, workHours, holidays, isHoliday, worki
 import { quote, priceList } from './pricing.js';
 import { waStatus, onStatus, requestPairing, logout as waLogout, restart as waRestart } from './channels/baileys.js';
 import { sttLabel } from './stt.js';
-import { notifyManagers } from './notify.js';
+import { notifyManagers, adminLink, localTime } from './notify.js';
+import { listManagers, saveManager, deleteManager, getManager, setManager, assignHandoff, clearCallDue,
+  listCalls, logCall, saveRecording, sweepRecordings, overdueCalls, CALL_STATUS } from './calls.js';
 import { aiConfigured, aiLabel } from './ai.js';
 
 /* ─────────── Процесс не должен умирать молча ───────────
@@ -100,6 +102,11 @@ app.get('/api/state', (req, res) => {
     admin_url: getSetting('admin_url') || process.env.RENDER_EXTERNAL_URL || '',
     source_map: getSetting('source_map') || '',
     media_required: getSetting('media_required') || '',
+    call_sla_min: Number(getSetting('call_sla_min')) || 5,
+    rec_max_mb: Number(getSetting('rec_max_mb')) || 50,
+    rec_keep_days: Number(getSetting('rec_keep_days')) || 0,
+    managers: listManagers(),
+    call_status: CALL_STATUS,
     ai_effort: getSetting('ai_effort') || process.env.AI_EFFORT || 'low',
     stt_label: sttLabel(),
     nudge_on: getSetting('nudge_on') === '1',
@@ -141,6 +148,9 @@ app.post('/api/state', (req, res) => {
   if ('admin_url' in req.body) setSetting('admin_url', String(req.body.admin_url).trim());
   if ('source_map' in req.body) setSetting('source_map', String(req.body.source_map));
   if ('media_required' in req.body) setSetting('media_required', String(req.body.media_required));
+  for (const [k, lo, hi] of [['call_sla_min', 1, 240], ['rec_max_mb', 1, 200], ['rec_keep_days', 0, 3650]]) {
+    if (k in req.body) setSetting(k, String(Math.min(hi, Math.max(lo, Math.round(Number(req.body[k]) || 0)))));
+  }
   if ('ai_effort' in req.body) {
     const v = String(req.body.ai_effort).toLowerCase();
     if (!['low', 'medium', 'high'].includes(v)) return res.status(400).json({ error: 'Глубина: low, medium или high' });
@@ -507,17 +517,13 @@ app.post('/api/conversations/:id/mode', (req, res) => {
   // вернули боту — значит передачу отработали: следующее уведомление снова придёт
   db.prepare('UPDATE conversations SET ai_enabled=?, status=?, needs_human=0, handoff_reason=NULL, notified_at=NULL WHERE id=?')
     .run(ai ? 1 : 0, ai ? 'ai' : 'human', id);
+  if (ai) clearCallDue(id, 'менеджер', 'диалог вернули боту');
   addMessage(id, { direction: 'out', author: 'system', body: ai ? 'ИИ снова ведёт диалог' : 'Диалог перехвачен менеджером' });
   emit('conversations', null);
   emit('message', { conv_id: id });
   res.json(getConversation(id));
 });
 
-/**
- * Перевод заявки между колонками доски. Колонка — это не отдельное поле,
- * а комбинация владельца диалога (ИИ или человек) и стадии воронки,
- * поэтому раскладываем её здесь, в одном месте.
- */
 /**
  * Смена этапа вручную (ТЗ §3). Проигранной сделке нужна причина — без неё
  * сервер отказывает, иначе отчёт по потерям пустой. Ручная смена этапа
@@ -547,6 +553,8 @@ app.post('/api/conversations/:id/flag', (req, res) => {
   db.prepare('UPDATE conversations SET needs_human=?, handoff_reason=? WHERE id=?')
     .run(on ? 1 : 0, on ? (conv.handoff_reason || 'передано менеджеру вручную') : null, id);
   audit('lead', id, 'needs_human', conv.needs_human, on ? 1 : 0, 'менеджер');
+  if (on) assignHandoff(id, { actor: 'менеджер', why: 'отмечено вручную' });
+  else clearCallDue(id, 'менеджер', 'флаг «нужен менеджер» снят');
   emit('conversations', null);
   res.json(getConversation(id));
 });
@@ -566,6 +574,42 @@ app.post('/api/conversations/:id/reviewed', (req, res) => {
 app.get('/api/conversations/:id/audit', (req, res) => {
   res.json(db.prepare('SELECT * FROM audit_log WHERE entity=? AND entity_id=? ORDER BY id DESC LIMIT 100')
     .all('lead', Number(req.params.id)));
+});
+
+/* ─────────── Менеджеры и звонки (ТЗ §2, §6) ─────────── */
+
+app.get('/api/managers', (req, res) => res.json(listManagers()));
+app.post('/api/managers', (req, res) => {
+  try { res.json(saveManager(req.body || {})); emit('conversations', null); }
+  catch (e) { res.status(400).json({ error: e.message }); }
+});
+app.delete('/api/managers/:id', (req, res) => {
+  deleteManager(Number(req.params.id));
+  emit('conversations', null);
+  res.json({ ok: true });
+});
+
+app.post('/api/conversations/:id/manager', (req, res) => {
+  const id = Number(req.params.id);
+  try { setManager(id, Number(req.body.manager_id) || null); }
+  catch (e) { return res.status(400).json({ error: e.message }); }
+  emit('conversations', null);
+  res.json(getConversation(id));
+});
+
+app.get('/api/conversations/:id/calls', (req, res) => res.json(listCalls(Number(req.params.id))));
+app.post('/api/conversations/:id/calls', (req, res) => {
+  const id = Number(req.params.id);
+  try { logCall(id, req.body || {}); }
+  catch (e) { return res.status(400).json({ error: e.message }); }
+  emit('conversations', null);
+  res.json({ conv: getConversation(id), calls: listCalls(id) });
+});
+
+// запись разговора — сырым телом: JSON с base64 на 50 МБ раздувает память
+app.post('/api/recordings', express.raw({ type: () => true, limit: '200mb' }), (req, res) => {
+  try { res.json({ file: saveRecording(req.body, req.headers['content-type']) }); }
+  catch (e) { res.status(400).json({ error: e.message }); }
 });
 
 app.post('/api/conversations/:id/status', (req, res) => {
@@ -699,6 +743,22 @@ setInterval(() => {
     waRestart().catch((e) => console.error('перезапуск подключения:', e.message));
   }
 }, 6e4).unref?.();
+
+/* Просроченный звонок (ТЗ §7): ответственному и владельцу, один раз на срок.
+   Новый срок (следующий звонок) снова включает контроль. */
+setInterval(async () => {
+  for (const c of overdueCalls()) {
+    db.prepare("UPDATE conversations SET call_escalated_at=datetime('now') WHERE id=?").run(c.id);
+    let l = {};
+    try { l = JSON.parse(c.lead || '{}'); } catch {}
+    const m = getManager(c.manager_id);
+    await notifyManagers(`⏰ Просрочен звонок: ${l.name || c.name || 'клиент'}, +${c.phone}`
+      + `\nСрок был ${localTime(c.call_due_at)}${m ? `, ответственный ${m.name}` : ', ответственный не назначен'}`
+      + `\n${adminLink(c.id)}`, { convId: c.id, owners: true }).catch(() => {});
+    emit('conversations', null);
+  }
+}, 6e4).unref?.();
+setInterval(sweepRecordings, 36e5).unref?.();
 
 app.listen(PORT, async () => {
   console.log(`\n  Админка:    http://localhost:${PORT}`);
