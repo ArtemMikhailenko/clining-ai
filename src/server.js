@@ -3,7 +3,8 @@ import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
 import { spawn } from 'node:child_process';
-import { db, listConversations, getConversation, history, getSetting, setSetting, addMessage, resetData } from './db.js';
+import { db, listConversations, getConversation, history, getSetting, setSetting, addMessage, resetData, applyStage, audit, waitsMedia } from './db.js';
+import { stageIndex, amountOf, STAGE_TITLE, CLOSE_TITLE } from './stages.js';
 import { handleIncoming, sendAsHuman, suggestReply, subscribe, emit } from './bot.js';
 import * as botState from './bot.js';
 import { channel, channels } from './channels/index.js';
@@ -98,6 +99,7 @@ app.get('/api/state', (req, res) => {
     notify_on: getSetting('notify_on') === '1',
     admin_url: getSetting('admin_url') || process.env.RENDER_EXTERNAL_URL || '',
     source_map: getSetting('source_map') || '',
+    media_required: getSetting('media_required') || '',
     ai_effort: getSetting('ai_effort') || process.env.AI_EFFORT || 'low',
     stt_label: sttLabel(),
     nudge_on: getSetting('nudge_on') === '1',
@@ -138,6 +140,7 @@ app.post('/api/state', (req, res) => {
   if ('notify_on' in req.body) setSetting('notify_on', req.body.notify_on ? '1' : '0');
   if ('admin_url' in req.body) setSetting('admin_url', String(req.body.admin_url).trim());
   if ('source_map' in req.body) setSetting('source_map', String(req.body.source_map));
+  if ('media_required' in req.body) setSetting('media_required', String(req.body.media_required));
   if ('ai_effort' in req.body) {
     const v = String(req.body.ai_effort).toLowerCase();
     if (!['low', 'medium', 'high'].includes(v)) return res.status(400).json({ error: 'Глубина: low, medium или high' });
@@ -182,6 +185,10 @@ app.get('/api/stats', (req, res) => {
   const leads = rows.map((c) => ({ ...c, l: JSON.parse(c.lead || '{}') }));
 
   const count = (fn) => leads.filter(fn).length;
+  // «дошла до этапа» — значит стоит на нём или прошла дальше, включая оплаченные
+  const reached = (c, stage) => c.close_reason === 'paid'
+    || (c.stage !== 'closed' && stageIndex(c.stage) >= stageIndex(stage));
+  const stageName = (c) => (c.stage === 'closed' ? 'Закрыто · ' + (CLOSE_TITLE[c.close_reason] || '—') : STAGE_TITLE[c.stage || 'new']);
   const group = (pick) => {
     const m = new Map();
     for (const c of leads) { const v = pick(c); if (v) m.set(v, (m.get(v) || 0) + 1); }
@@ -191,8 +198,8 @@ app.get('/api/stats', (req, res) => {
   // Деньги в трёх состояниях: что бот прикинул, о чём договорились, что получили.
   // Средний чек считаем по согласованным суммам — оценка бота это ещё не выручка.
   const totals = (nums) => ({ sum: nums.reduce((a, b) => a + b, 0), n: nums.length });
-  const nums = (rows, pick) => rows.map(pick).map((v) => Number(String(v ?? '').replace(/[^\d]/g, '')))
-    .filter((n) => n > 0);
+  // суммы разбираем аккуратно: «от 20 ₪/м², минимум 1500 ₪» — это 1500, а не 201 500
+  const nums = (rows, pick) => rows.map(pick).map(amountOf).filter((n) => n > 0);
   const money = {
     quoted: totals(nums(leads, (c) => c.l.price_quote)),
     agreed: totals(nums(leads, (c) => c.deal_sum)),
@@ -225,8 +232,7 @@ app.get('/api/stats', (req, res) => {
     byDay.push({
       d,
       n: leads.filter((c) => c.created_at.slice(0, 10) === d).length,
-      won: leads.filter((c) => c.created_at.slice(0, 10) === d
-        && ['готов к заказу', 'дата согласована'].includes(c.l.stage)).length
+      won: leads.filter((c) => c.created_at.slice(0, 10) === d && reached(c, 'agreed')).length
     });
   }
 
@@ -254,23 +260,25 @@ app.get('/api/stats', (req, res) => {
     by_day: byDay,
     prev: {
       total: prevRows.length,
-      agreed: prevRows.filter((c) => ['готов к заказу', 'дата согласована'].includes(c.l.stage)).length,
+      agreed: prevRows.filter((c) => reached(c, 'agreed')).length,
       avg_check: prevMoney.length ? Math.round(prevMoney.reduce((a, b) => a + b, 0) / prevMoney.length) : 0
     },
     total: leads.length,
     today: count((c) => c.created_at.slice(0, 10) === new Date().toISOString().slice(0, 10)),
     need_human: count((c) => c.needs_human),
-    agreed: count((c) => ['готов к заказу', 'дата согласована'].includes(c.l.stage)),
-    quoted: count((c) => c.l.price_quote),
+    agreed: count((c) => reached(c, 'agreed')),
+    quoted: count((c) => reached(c, 'offer')),
+    paid: count((c) => c.close_reason === 'paid'),
     closed: count((c) => c.status === 'closed'),
-    refused: count((c) => c.l.stage === 'отказ'),
+    refused: count((c) => c.close_reason === 'lost'),
+    review: count((c) => c.review),
     avg_check: avgCheck,
     money,
     avg_reply_sec: avgReply,
     photos,
     by_service: group((c) => c.l.service),
     by_district: group((c) => c.l.district).slice(0, 6),
-    by_stage: group((c) => c.l.stage),
+    by_stage: group(stageName),
     by_source: group((c) => c.source || 'не определён')
   });
 });
@@ -278,7 +286,7 @@ app.get('/api/stats', (req, res) => {
 app.get('/api/conversations/:id', (req, res) => {
   const conv = getConversation(Number(req.params.id));
   if (!conv) return res.sendStatus(404);
-  res.json({ ...conv, messages: history(conv.id, 200), quote: quote(JSON.parse(conv.lead || '{}')) });
+  res.json({ ...conv, wait_media: waitsMedia(conv), messages: history(conv.id, 200), quote: quote(JSON.parse(conv.lead || '{}')) });
 });
 
 /** Черновик ответа для менеджера: показать, но не отправлять. */
@@ -303,6 +311,7 @@ app.post('/api/conversations/:id/lead', (req, res) => {
   if (!conv) return res.sendStatus(404);
 
   const lead = JSON.parse(conv.lead || '{}');
+  const stageMoves = [];
   for (const k of LEAD_FIELDS) {
     if (k in req.body) {
       const v = String(req.body[k] ?? '').trim();
@@ -325,6 +334,7 @@ app.post('/api/conversations/:id/lead', (req, res) => {
       .run(jd || null, jt || null, jd || null, id);
     if (jd && lead.stage !== 'отказ') lead.stage = 'дата согласована';
     if (!jd && lead.stage === 'дата согласована') lead.stage = 'готов к заказу';
+    stageMoves.push(jd ? ['agreed', 'менеджер поставил дату записи'] : null);
   }
   // Деньги проставляет человек: «согласовано» — то, о чём договорились,
   // «оплачено» — то, что реально получили. Оценка бота остаётся в карточке отдельно.
@@ -332,6 +342,11 @@ app.post('/api/conversations/:id/lead', (req, res) => {
     if (!(k in req.body)) continue;
     const n = Number(String(req.body[k] ?? '').replace(/[^\d]/g, ''));
     db.prepare(`UPDATE conversations SET ${k}=? WHERE id=?`).run(n > 0 ? n : null, id);
+    audit('lead', id, k, conv[k], n > 0 ? n : null, 'менеджер');
+    // окончательная цена от менеджера — это и есть «предложение отправлено»;
+    // оплата закрывает сделку как оплаченную
+    if (k === 'deal_sum' && n > 0) stageMoves.push(['offer', 'менеджер назвал окончательную цену']);
+    if (k === 'paid_sum' && n > 0) stageMoves.push(['closed:paid', 'внесена оплата']);
   }
   if ('paid_at' in req.body) {
     const d = String(req.body.paid_at ?? '').trim();
@@ -357,6 +372,17 @@ app.post('/api/conversations/:id/lead', (req, res) => {
     db.prepare('UPDATE conversations SET source=? WHERE id=?').run(String(req.body.source ?? '').trim() || null, id);
   }
   db.prepare('UPDATE conversations SET lead=? WHERE id=?').run(JSON.stringify(lead), id);
+
+  // этап двигается только вперёд: поставили цену на уже согласованной заявке —
+  // она не откатывается в «предложение»
+  for (const move of stageMoves.filter(Boolean)) {
+    const cur = getConversation(id);
+    const [to, close] = move[0].split(':');
+    const ahead = to === 'closed' || cur.stage === 'closed' || stageIndex(to) > stageIndex(cur.stage);
+    if (ahead && !(cur.stage === 'closed' && cur.close_reason === 'paid')) {
+      applyStage(id, to, { close: close || null, actor: 'менеджер', why: move[1] });
+    }
+  }
   emit('conversations', null);
   res.json({ ...getConversation(id), quote: quote(lead) });
 });
@@ -493,55 +519,53 @@ app.post('/api/conversations/:id/mode', (req, res) => {
  * поэтому раскладываем её здесь, в одном месте.
  */
 /**
- * Куда попадает карточка при переносе. Раньше «назвали цену» и «договорились»
- * меняли только стадию — а если у диалога стоял флаг «нужен человек», карточка
- * оставалась в своей колонке: тост говорил «перенесено», и ничего не менялось.
- * Поэтому каждое действие теперь явно отвечает за три вещи: флаг человека,
- * статус и стадию.
+ * Смена этапа вручную (ТЗ §3). Проигранной сделке нужна причина — без неё
+ * сервер отказывает, иначе отчёт по потерям пустой. Ручная смена этапа
+ * означает, что менеджер посмотрел заявку, поэтому пометка «проверить» снимается.
  */
-const COLUMN_ACTIONS = {
-  need:    { ai: 0, status: 'human', needs: 1, reason: 'передано менеджеру вручную' },
-  manager: { ai: 0, status: 'human', needs: 0, stage: 'уточняем' },
-  ai:      { ai: 1, status: 'ai',    needs: 0, stage: 'уточняем' },
-  quoted:  { needs: 0, stage: 'назвали цену' },
-  agreed:  { needs: 0, stage: 'дата согласована' },
-  // архив: три корзины вместо одной кучи «закрыто»
-  staff:   { status: 'closed', needs: 0, archive: 'staff' },
-  later:   { status: 'closed', needs: 0, archive: 'later' },
-  refused: { status: 'closed', needs: 0, archive: 'refused', stage: 'отказ' }
-};
-COLUMN_ACTIONS.closed = COLUMN_ACTIONS.refused;   // старое имя колонки
-
-app.post('/api/conversations/:id/column', (req, res) => {
+app.post('/api/conversations/:id/stage', (req, res) => {
   const id = Number(req.params.id);
-  const key = String(req.body.column);
-  const act = COLUMN_ACTIONS[key];
-  if (!act) return res.status(400).json({ error: 'Неизвестная колонка' });
-
-  const conv = getConversation(id);
-  if (!conv) return res.sendStatus(404);
-
-  const lead = JSON.parse(conv.lead || '{}');
-  if (act.stage) lead.stage = act.stage;
-  // «отказ» в стадии держит карточку в архиве, куда бы её ни перенесли
-  if (!act.archive && lead.stage === 'отказ') lead.stage = act.stage || 'уточняем';
-
-  const set = { lead: JSON.stringify(lead) };
-  if ('ai' in act) set.ai_enabled = act.ai;
-  if ('needs' in act) {
-    set.needs_human = act.needs;
-    set.handoff_reason = act.needs ? (act.reason ?? conv.handoff_reason ?? 'передано вручную') : null;
+  if (!getConversation(id)) return res.sendStatus(404);
+  try {
+    applyStage(id, String(req.body.stage), {
+      close: req.body.close ?? null, lostReason: req.body.reason ?? null, actor: 'менеджер', why: req.body.reason ?? null
+    });
+  } catch (e) {
+    return res.status(400).json({ error: e.message });
   }
-  // вернуть из архива в работу, если переносят в рабочую колонку
-  set.status = act.status ?? (conv.status === 'closed' ? 'human' : conv.status);
-  set.archive = act.archive ?? null;
-
-  const keys = Object.keys(set);
-  db.prepare(`UPDATE conversations SET ${keys.map((k) => `${k}=?`).join(',')} WHERE id=?`)
-    .run(...keys.map((k) => set[k]), id);
-
+  db.prepare('UPDATE conversations SET review=NULL WHERE id=?').run(id);
   emit('conversations', null);
   res.json(getConversation(id));
+});
+
+/** Флаг «нужен менеджер» — признак, а не этап: ставится и снимается отдельно. */
+app.post('/api/conversations/:id/flag', (req, res) => {
+  const id = Number(req.params.id);
+  const conv = getConversation(id);
+  if (!conv) return res.sendStatus(404);
+  const on = Boolean(req.body.needs_human);
+  db.prepare('UPDATE conversations SET needs_human=?, handoff_reason=? WHERE id=?')
+    .run(on ? 1 : 0, on ? (conv.handoff_reason || 'передано менеджеру вручную') : null, id);
+  audit('lead', id, 'needs_human', conv.needs_human, on ? 1 : 0, 'менеджер');
+  emit('conversations', null);
+  res.json(getConversation(id));
+});
+
+/** Пометка «проверить после переноса» снята — заявку посмотрели. */
+app.post('/api/conversations/:id/reviewed', (req, res) => {
+  const id = Number(req.params.id);
+  const conv = getConversation(id);
+  if (!conv) return res.sendStatus(404);
+  db.prepare('UPDATE conversations SET review=NULL WHERE id=?').run(id);
+  audit('lead', id, 'review', conv.review, null, 'менеджер');
+  emit('conversations', null);
+  res.json(getConversation(id));
+});
+
+/** История этапов и ключевых полей — для карточки. */
+app.get('/api/conversations/:id/audit', (req, res) => {
+  res.json(db.prepare('SELECT * FROM audit_log WHERE entity=? AND entity_id=? ORDER BY id DESC LIMIT 100')
+    .all('lead', Number(req.params.id)));
 });
 
 app.post('/api/conversations/:id/status', (req, res) => {

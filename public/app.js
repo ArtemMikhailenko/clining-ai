@@ -97,39 +97,40 @@ const plural = (n, a, b, c) => { const m = n % 100, k = n % 10;
   return m > 10 && m < 20 ? c : k === 1 ? a : k > 1 && k < 5 ? b : c; };
 
 /* ───── колонки доски: комбинация владельца диалога и стадии воронки ───── */
+// Воронка по ТЗ §3: колонка — это этап сделки. Кто ведёт диалог (бот или
+// менеджер) и «нужен менеджер» — признаки на карточке, а не колонки.
 const COLUMNS = [
-  { k:'need',    t:'Нужен человек', c:'var(--warn)',   hint:'ИИ передал диалог' },
-  { k:'manager', t:'У менеджера',   c:'var(--s1)',     hint:'человек ведёт сам' },
-  { k:'ai',      t:'ИИ уточняет',   c:'var(--accent)', hint:'бот собирает заявку' },
-  { k:'quoted',  t:'Назвали цену',  c:'var(--s4)',     hint:'ждём решения клиента' },
-  { k:'agreed',  t:'Договорились',  c:'var(--s3)',     hint:'дата согласована' }
+  { k:'new',     t:'Новая',                   c:'var(--muted)',  hint:'бот ещё не начал разговор' },
+  { k:'clarify', t:'Уточнение',               c:'var(--accent)', hint:'собираем данные по заявке' },
+  { k:'offer',   t:'Предложение отправлено',  c:'var(--s4)',     hint:'менеджер назвал окончательную цену' },
+  { k:'agreed',  t:'Согласовано / назначено', c:'var(--s3)',     hint:'цена и дата подтверждены' },
+  { k:'done',    t:'Выполнено',               c:'var(--s1)',     hint:'уборка сделана, ждём оплату' }
 ];
-// Архив — не одна куча «закрыто»: там вперемешку свои сотрудники, живые лиды
-// «не сейчас» и настоящие отказы. С одной колонкой это невозможно разобрать.
+// Закрытые сделки — по подстатусам. «Неквалифицировано» разбито на две
+// корзины, как просил менеджер; для отчёта это один подстатус.
 const ARCHIVE = [
-  { k:'staff',   t:'Сотрудники',    c:'var(--s1)',     hint:'свои номера, не клиенты' },
-  { k:'later',   t:'Обычные уборки', c:'var(--s4)',    hint:'бытовая уборка, не после ремонта' },
-  { k:'refused', t:'Отказ',         c:'var(--muted)',  hint:'не релевантно или клиент отказался' }
+  { k:'paid',        t:'Оплачено',          c:'var(--s3)',    hint:'сделка оплачена' },
+  { k:'lost',        t:'Проиграно',         c:'var(--muted)', hint:'клиент отказался — с причиной' },
+  { k:'unq_regular', t:'Обычные уборки',    c:'var(--s4)',    hint:'неквалифицировано: бытовая уборка' },
+  { k:'unq_staff',   t:'Сотрудники',        c:'var(--s1)',    hint:'неквалифицировано: ищут работу, свои' }
 ];
 const ALL_COLS = [...COLUMNS, ...ARCHIVE];
 const isArchive = (k) => ARCHIVE.some((x) => x.k === k);
 
 function columnOf(c) {
-  const st = lead(c).stage;
-  if (c.status === 'closed' || st === 'отказ') {
-    return ARCHIVE.some((x) => x.k === c.archive) ? c.archive : 'refused';
+  if (c.stage === 'closed' || c.status === 'closed') {
+    return ARCHIVE.some((x) => x.k === c.close_reason) ? c.close_reason : 'lost';
   }
-  if (c.needs_human) return 'need';
-  if (['готов к заказу', 'дата согласована'].includes(st)) return 'agreed';
-  if (st === 'назвали цену') return 'quoted';
-  if (c.status === 'human') return 'manager';
-  return 'ai';
+  return COLUMNS.some((x) => x.k === c.stage) ? c.stage : 'new';
 }
 const colTitle = (k) => (ALL_COLS.find((x) => x.k === k) || { t: k }).t;
 
+let flagFilter = null;   // 'need' | 'review' — признаки, по которым смотрят очередь
 const matches = (c) => {
   // на доске чужие колонки только приглушаются, фильтрует лишь список
   if (stageFilter && leadView === 'list' && columnOf(c) !== stageFilter) return false;
+  if (flagFilter === 'need' && !(c.needs_human && c.status !== 'closed')) return false;
+  if (flagFilter === 'review' && !c.review) return false;
   const q = query.trim().toLowerCase();
   if (!q) return true;
   return (c.name || '').toLowerCase().includes(q) || String(c.phone).includes(q)
@@ -157,9 +158,13 @@ function paint(box, html) {
 
 function chipFor(c) {
   if (c.status === 'closed') return '<span class="chip closed">в архиве</span>';
-  if (c.needs_human) return '<span class="chip need">нужен человек</span>';
-  return ({ ai:'<span class="chip ai">ИИ ведёт</span>', human:'<span class="chip human">менеджер</span>',
-    closed:'<span class="chip closed">закрыта</span>', new:'<span class="chip ai">новая</span>' })[c.status] ?? '';
+  const chips = [];
+  if (c.needs_human) chips.push('<span class="chip need">нужен менеджер</span>');
+  else chips.push(c.ai_enabled ? '<span class="chip ai">ИИ ведёт</span>' : '<span class="chip human">менеджер</span>');
+  if (c.wait_media) chips.push('<span class="chip wait">ждём фото/видео</span>');
+  if (c.stage === 'done' && !c.paid_sum) chips.push('<span class="chip wait">ожидается оплата</span>');
+  if (c.review) chips.push(`<span class="chip review" title="${esc(c.review)}">проверить</span>`);
+  return chips.join('');
 }
 
 /* ═══════════ страницы ═══════════ */
@@ -243,12 +248,12 @@ function renderHeaderStats() {
   const active = convs.filter((c) => c.status !== 'closed').length;
   // в воронке считаем согласованные суммы, а где их нет — оценку бота:
   // иначе цифра в шапке живёт своей жизнью и ей перестают верить
-  const money = convs.filter((c) => c.status !== 'closed')
-    .reduce((a, c) => a + (Number(c.deal_sum) || Number(String(lead(c).price_quote || '').replace(/[^\d]/g, '')) || 0), 0);
+  const inFunnel = convs.filter((c) => c.status !== 'closed')
+    .reduce((a, c) => a + (Number(c.deal_sum) || money(lead(c).price_quote)), 0);
   el.innerHTML = `
     <span class="hchip ${need ? 'warn' : ''}"><b>${need}</b> ждут ответа</span>
     <span class="hchip"><b>${active}</b> в работе</span>
-    <span class="hchip gold"><b>${money.toLocaleString('ru-RU')} ₪</b> в воронке</span>`;
+    <span class="hchip gold"><b>${inFunnel.toLocaleString('ru-RU')} ₪</b> в воронке</span>`;
 }
 
 /** Выгрузка заявок для бухгалтерии или переноса в другую систему. */
@@ -297,7 +302,25 @@ const ICONS = {
   pin: '<path d="M12 21s-7-6.2-7-11.5a7 7 0 0 1 14 0C19 14.8 12 21 12 21z"/><circle cx="12" cy="9.5" r="2.5"/>',
   time: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>'
 };
-const money = (v) => Number(String(v || '').replace(/[^\d]/g, '')) || 0;
+/**
+ * Сумма из строки цены — та же логика, что amountOf в src/stages.js.
+ * Раньше выбрасывались все нецифры, и «от 20 ₪/м², минимум 1500 ₪»
+ * превращалось в 201 500 ₪ в шапке и колонках.
+ */
+function money(v) {
+  if (typeof v === 'number') return v > 0 ? Math.round(v) : 0;
+  const s = String(v ?? '').replace(/[\u00a0\u202f\u2009]/g, ' ');
+  const range = s.match(/(\d[\d ,.]*\d)\s*[–—-]\s*\d[\d ,.]*\d\s*(?:₪|шек\w*|ils|nis|ש"ח|שקל\w*)(?!\s*\/)/i);
+  if (range) { const n = Number(range[1].replace(/[ ,]/g, '')); if (n > 0) return n; }
+  const re = /(\d[\d ,.]*\d|\d)\s*(?:₪|шек\w*|ils|nis|ש"ח|שקל\w*)(?!\s*\/\s*(?:м|m|מ))/gi;
+  let m;
+  while ((m = re.exec(s))) {
+    const n = Number(m[1].replace(/ /g, '').replace(/,(?=\d{3}\b)/g, '').replace(/\.(?=\d{3}\b)/g, '').replace(',', '.'));
+    if (n > 0) return Math.round(n);
+  }
+  const bare = s.trim().match(/^\d[\d ]*$/);
+  return bare ? Number(bare[0].replace(/ /g, '')) : 0;
+}
 const ddmm = (d) => `${d.slice(8)}.${d.slice(5, 7)}`;
 
 /** Мини-столбики для карточки показателя: на редких данных линия
@@ -334,8 +357,9 @@ function barChart(series) {
 function funnel(s) {
   const steps = [
     { t: 'Заявки', v: s.total, c: 'var(--accent)' },
-    { t: 'Назвали цену', v: s.quoted, c: 'var(--s4)', why: 'получили цену' },
-    { t: 'Договорились', v: s.agreed, c: 'var(--s3)', why: 'согласились' }
+    { t: 'Предложение', v: s.quoted, c: 'var(--s4)', why: 'получили предложение' },
+    { t: 'Согласовано', v: s.agreed, c: 'var(--s3)', why: 'согласились' },
+    { t: 'Оплачено', v: s.paid, c: 'var(--green)', why: 'оплатили' }
   ];
   const base = s.total || 1;
   const pct = (a, b) => Math.min(100, Math.round(a / (b || 1) * 100));
@@ -347,8 +371,9 @@ function funnel(s) {
 }
 
 // цвета стадий те же, что у колонок доски и воронки в меню
-const STAGE_COLOR = { 'уточняем': 'var(--accent)', 'назвали цену': 'var(--s4)', 'дата согласована': 'var(--s3)',
-  'готов к заказу': 'var(--s3)', 'отказ': 'var(--muted)' };
+const STAGE_COLOR = { 'Новая': 'var(--s1)', 'Уточнение': 'var(--accent)', 'Предложение отправлено': 'var(--s4)',
+  'Согласовано / назначено': 'var(--s3)', 'Выполнено': 'var(--green)', 'Закрыто · оплачено': 'var(--green)', 'Закрыто · проиграно': 'var(--muted)',
+  'Закрыто · неквалифицировано · обычная уборка': 'var(--border)', 'Закрыто · неквалифицировано · сотрудник': 'var(--border)' };
 
 const pempty = (text, icon) => `<div class="pempty">${icon ? ico(icon) : ''}${text}</div>`;
 
@@ -413,7 +438,7 @@ function renderDash() {
         ${funnel(s)}
         <div class="panel-foot"><div class="stg">${s.by_stage.map(([n, v]) =>
           `<span><i style="background:${STAGE_COLOR[n] || 'var(--s1)'}"></i>${esc(n)} <b>${v}</b></span>`).join('')}
-          <span><i style="background:var(--muted)"></i>закрыто <b>${s.closed}</b></span></div>
+</div>
           ${s.money ? `<div class="info"><span>Оценки бота</span><b>${s.money.quoted.sum.toLocaleString('ru-RU')} ₪ · ${s.money.quoted.n}</b></div>
             <div class="info"><span>Согласовано</span><b>${s.money.agreed.sum.toLocaleString('ru-RU')} ₪ · ${s.money.agreed.n}</b></div>
             <div class="info"><span>Оплачено</span><b>${s.money.paid.sum.toLocaleString('ru-RU')} ₪ · ${s.money.paid.n}</b></div>` : ''}
@@ -626,10 +651,13 @@ function cardHtml(c) {
 
 function subLine(n) {
   const el = $('#pg-sub');
+  const flagT = { need: 'нужен менеджер', review: 'проверить после переноса' }[flagFilter];
   el.innerHTML = `${n} ${plural(n, 'заявка', 'заявки', 'заявок')}`
-    + (stageFilter ? ` · ${esc(colTitle(stageFilter))}<span class="clr" id="clr-stage">сбросить</span>` : '');
+    + (stageFilter ? ` · ${esc(colTitle(stageFilter))}` : '')
+    + (flagT ? ` · ${flagT}` : '')
+    + (stageFilter || flagT ? '<span class="clr" id="clr-stage">сбросить</span>' : '');
   const x = $('#clr-stage');
-  if (x) x.onclick = () => setStage(null);
+  if (x) x.onclick = () => { flagFilter = null; setStage(null); };
 }
 
 /**
@@ -638,8 +666,15 @@ function subLine(n) {
  * оставался — и карточка возвращалась на место. Теперь расхождение видно сразу.
  */
 async function moveTo(id, key) {
+  let reason = null;
+  if (key === 'lost') {
+    // ТЗ §13: проигранная сделка без причины не закрывается — иначе нечего анализировать
+    reason = prompt('Почему сделка проиграна? Например: дорого, выбрал другую компанию, передумал');
+    if (!reason || !reason.trim()) { toast('Без причины проигрыш не сохраняется', true); return false; }
+  }
+  const body = isArchive(key) ? { stage: 'closed', close: key, reason } : { stage: key };
   try {
-    const updated = await api(`/api/conversations/${id}/column`, { method: 'POST', body: JSON.stringify({ column: key }) });
+    const updated = await api(`/api/conversations/${id}/stage`, { method: 'POST', body: JSON.stringify(body) });
     const landed = columnOf(updated);
     if (landed === key) toast('Перенесено в «' + colTitle(key) + '»');
     else toast(`Не удалось перенести: заявка осталась в «${colTitle(landed)}»`, true);
@@ -671,9 +706,19 @@ function renderFunnel() {
     .map((x) => `<i style="flex:${by[x.k]};background:${x.c}" title="${x.t}: ${by[x.k]}"></i>`).join('')
     || '<i style="flex:1;background:var(--border)"></i>';
   const archived = ARCHIVE.reduce((a, x) => a + by[x.k], 0);
-  box.innerHTML = `<div class="fbar">${bar}</div>` + COLUMNS.map((x) => {
-    const cls = [stageFilter === x.k && 'on', !by[x.k] && 'zero', x.k === 'need' && by[x.k] && 'alert']
-      .filter(Boolean).join(' ');
+  // очереди по признакам: ради «нужен менеджер» менеджер и открывает CRM
+  const needN = convs.filter((c) => c.needs_human && c.status !== 'closed').length;
+  const reviewN = convs.filter((c) => c.review).length;
+  const wip = Number(state.wip_need) || 0;
+  const flagRow = (k, t, n, c, alert) => `<a class="frow flag ${flagFilter === k ? 'on' : ''} ${n ? '' : 'zero'} ${alert ? 'alert' : ''}"
+      data-flag="${k}"><span class="fdot" style="--c:${c}"></span><span class="lbl">${t}</span>
+      <span class="fn">${n}${k === 'need' && wip && n > wip ? ' / ' + wip : ''}</span></a>`;
+  box.innerHTML = `<div class="fbar">${bar}</div>`
+  + flagRow('need', 'Нужен менеджер', needN, 'var(--warn)', needN > 0)
+  + (reviewN ? flagRow('review', 'Проверить после переноса', reviewN, 'var(--s5)', false) : '')
+  + '<div class="fsep"></div>'
+  + COLUMNS.map((x) => {
+    const cls = [stageFilter === x.k && 'on', !by[x.k] && 'zero'].filter(Boolean).join(' ');
     return `<a class="frow ${cls}" data-k="${x.k}"><span class="fdot" style="--c:${x.c}"></span>
       <span class="lbl">${x.t}</span><span class="fn">${by[x.k]}</span></a>`;
   }).join('')
@@ -681,6 +726,13 @@ function renderFunnel() {
   + `<a class="frow arch ${archived ? '' : 'zero'}" data-arch="1"><span class="fdot" style="--c:var(--muted)"></span>
       <span class="lbl">Архив</span><span class="fn">${archived}</span></a>`;
   $$('.frow[data-k]', box).forEach((r) => r.onclick = () => setStage(stageFilter === r.dataset.k ? null : r.dataset.k));
+  $$('.frow[data-flag]', box).forEach((r) => r.onclick = () => {
+    flagFilter = flagFilter === r.dataset.flag ? null : r.dataset.flag;
+    if (flagFilter && leadView === 'archive') { leadView = 'list'; localStorage.setItem('leadView', leadView); }
+    $('.app').classList.remove('menu-open');
+    renderFunnel();
+    if (page !== 'inbox') go('inbox'); else go('inbox');
+  });
   const arch = box.querySelector('[data-arch]');
   if (arch) arch.onclick = () => {
     stageFilter = null;
@@ -704,12 +756,12 @@ function renderBoard() {
   const wip = Number(state.wip_need) || 0;
   paint(board, cols.map((col) => {
     const items = by[col.k];
-    const money = items.reduce((a, c) => a + (Number(String(lead(c).price_quote || '').replace(/[^\d]/g, '')) || 0), 0);
-    const over = col.k === 'need' && wip && items.length > wip;
+    const sum = items.reduce((a, c) => a + money(lead(c).price_quote), 0);
+    const over = false;   // предел очереди «нужен менеджер» показывается в меню у флага
     const dim = stageFilter && stageFilter !== col.k ? 'dim' : '';
     return `<div class="colm ${over ? 'over-wip' : ''} ${dim}" data-col="${col.k}" style="--c:${col.c}">
       <div class="colm-head"><b>${col.t}</b>
-        ${money ? `<span class="sum">${money.toLocaleString('ru-RU')} ₪</span>` : ''}
+        ${sum ? `<span class="sum">${sum.toLocaleString('ru-RU')} ₪</span>` : ''}
         <span class="cnt">${items.length}${over ? ' / ' + wip : ''}</span></div>
       ${over ? '<div class="wip-warn">Очередь переполнена — клиенты ждут слишком долго</div>' : ''}
       <div class="colm-body">${items.map(cardHtml).join('')
@@ -776,14 +828,14 @@ function renderLeads() {
     // пустые группы не показываем: они занимали место и подсказка в строке
     // читалась как содержимое. Исключение — очередь «Нужен человек»:
     // её ноль сам по себе новость
-    if (!items.length && col.k !== 'need') return '';
-    const money = items.reduce((a, c) => a + (Number(String(lead(c).price_quote || '').replace(/[^\d]/g, '')) || 0), 0);
+    if (!items.length && col.k !== 'clarify') return '';
+    const sum = items.reduce((a, c) => a + money(lead(c).price_quote), 0);
     const closed = COLLAPSED.has(col.k);
-    const over = col.k === 'need' && wip && items.length > wip;
+    const over = false;
     return `<div class="grp ${closed ? 'closed' : ''}" data-g="${col.k}">
         <span class="caret">▾</span><span class="dot" style="background:${col.c}"></span>
         <b>${col.t}</b><span class="n">${items.length}${over ? ' / ' + wip : ''}</span>
-        ${money ? `<span class="sum">${money.toLocaleString('ru-RU')} ₪</span>` : ''}
+        ${sum ? `<span class="sum">${sum.toLocaleString('ru-RU')} ₪</span>` : ''}
       </div>
       ${closed ? '' : items.map(rowHtml).join('')}`;
   }).join(''));
@@ -796,13 +848,6 @@ function renderLeads() {
   });
   // открываем прямо в средней панели: главная работа не должна прятаться за overlay
   $$('.lrow', box).forEach((r) => r.onclick = () => openConv(Number(r.dataset.id), isMobile()));
-  $$('.lacts button', box).forEach((b) => b.onclick = async (e) => {
-    e.stopPropagation();
-    const id = Number(b.closest('.lrow').dataset.id);
-    await api(`/api/conversations/${id}/column`, { method: 'POST', body: JSON.stringify({ column: b.dataset.act }) });
-    toast(b.dataset.act === 'closed' ? 'Заявка закрыта' : b.dataset.act === 'ai' ? 'Диалог вернули боту' : 'Диалог у вас');
-    loadList();
-  });
 }
 
 /** Перемещение по списку с клавиатуры, как в почтовых клиентах. */
@@ -873,13 +918,14 @@ function bindChat(root) {
   // В архиве три корзины, и выбирать её должен человек: свои сотрудники,
   // живой лид «не сейчас» и настоящий отказ — это разные вещи.
   q('[data-a="close"]').onclick = (e) => {
-    if (c.status === 'closed') return moveTo(c.id, 'manager');
+    if (c.status === 'closed') return moveTo(c.id, 'clarify');
     const old = root.querySelector('.pickmenu');
     if (old) return old.remove();
     const menu = document.createElement('div');
     menu.className = 'pickmenu';
-    menu.innerHTML = '<div class="hint">В архив, в какую корзину?</div>'
-      + ARCHIVE.map((x) => `<div data-k="${x.k}"><b>${x.t}</b><span>${x.hint}</span></div>`).join('');
+    menu.innerHTML = '<div class="hint">Закрыть сделку как…</div>'
+      + ARCHIVE.filter((x) => x.k !== 'paid')   // оплаченной сделка становится, когда внесена сумма оплаты
+        .map((x) => `<div data-k="${x.k}"><b>${x.t}</b><span>${x.hint}</span></div>`).join('');
     e.currentTarget.parentElement.appendChild(menu);
     $$('div[data-k]', menu).forEach((d) => d.onclick = () => { menu.remove(); moveTo(c.id, d.dataset.k); });
     setTimeout(() => document.addEventListener('click', function off(ev) {
@@ -959,9 +1005,10 @@ async function send(root) {
 }
 
 /* ───── карточка заявки ───── */
+const MEDIA_SERVICES = ['после ремонта', 'перед въездом', 'после выезда', 'генеральная', 'поддерживающая'];
 const LABELS = { service:'Тип уборки', object_type:'Объект', area_m2:'Площадь, м²', rooms_count:'Комнат',
   bathrooms:'Санузлов', district:'Район', address:'Адрес', works:'Что сделать', date:'Хочет убрать',
-  windows:'Мыть окна', condition:'Загрязнение', price_quote:'Оценка бота', stage:'Стадия' };
+  windows:'Мыть окна', condition:'Загрязнение', price_quote:'Оценка бота', stage:'Стадия по оценке бота' };
 
 // поля диалога, а не карточки: запись подтверждает человек, источник приходит с рекламы
 const CONV_KEYS = new Set(['job_date', 'job_time', 'source', 'deal_sum', 'paid_sum', 'paid_at',
@@ -1014,6 +1061,15 @@ function isCold(c) {
     && (Date.now() - dt(c.last_at)) > 864e5;
 }
 
+// ТЗ §4.1: без этих полей менеджеру нечего обсуждать по телефону — пропуски видны сразу
+const MUST = { district: 'Город / район', object_type: 'Объект', area_m2: 'Площадь, м²', service: 'Тип уборки', date: 'Желаемая дата' };
+function gapsHtml(c) {
+  if (c.stage === 'closed') return '';
+  const l = lead(c);
+  const miss = Object.entries(MUST).filter(([k]) => !String(l[k] ?? '').trim()).map(([, t]) => t);
+  return miss.length ? `<div class="kv gap"><dt>Не хватает</dt><dd>${miss.map(esc).join(', ')}</dd></div>` : '';
+}
+
 function leadHtml(c) {
   const l = lead(c);
   const q = c.quote;
@@ -1048,12 +1104,17 @@ function leadHtml(c) {
           ${c.followup_at ? '<button class="btn ghost sm" data-fu="off">убрать</button>' : ''}
         </div>
       </div></div>
-    <div class="kv"><dt>Колонка</dt><dd><select data-r="col">
+    ${c.review ? `<div class="review-note"><b>Проверить после переноса:</b> ${esc(c.review)}
+      <button class="btn sm" data-a="reviewed">Проверено</button></div>` : ''}
+    <div class="kv"><dt>Этап</dt><dd><select data-r="col">
       <optgroup label="В работе">${COLUMNS.map((x) =>
         `<option value="${x.k}" ${columnOf(c) === x.k ? 'selected' : ''}>${x.t}</option>`).join('')}</optgroup>
-      <optgroup label="Архив">${ARCHIVE.map((x) =>
+      <optgroup label="Закрыто">${ARCHIVE.map((x) =>
         `<option value="${x.k}" ${columnOf(c) === x.k ? 'selected' : ''}>${x.t}</option>`).join('')}</optgroup>
     </select></dd></div>
+    ${c.close_reason === 'lost' && c.lost_reason ? `<div class="kv"><dt>Причина</dt><dd dir="auto">${esc(c.lost_reason)}</dd></div>` : ''}
+    ${c.status !== 'closed' ? `<div class="kv"><dt>Нужен менеджер</dt><dd>
+      <label class="switch"><input type="checkbox" data-r="need" ${c.needs_human ? 'checked' : ''}></label></dd></div>` : ''}
     <div class="kv"><dt>Телефон</dt><dd>+${esc(c.phone)}</dd></div>
     <div class="kv"><dt>Имя</dt><dd dir="auto">${esc(l.name || c.name || '—')}</dd></div>
     <div class="kv"><dt>Записан на</dt><dd>${c.job_date
@@ -1064,6 +1125,8 @@ function leadHtml(c) {
       c.source_title ? ` · ${esc(c.source_title)}` : ''}</dd></div>` : ''}
     ${c.followup_at ? `<div class="kv"><dt>Напомнить</dt><dd>${esc(c.followup_at)}${c.followup_note ? ' · ' + esc(c.followup_note) : ''}</dd></div>` : ''}
     ${c.nudges ? `<div class="kv"><dt>Напоминаний</dt><dd>${c.nudges}</dd></div>` : ''}
+    ${c.wait_media ? `<div class="kv gap"><dt>Фото/видео</dt><dd>нужны для этого вида уборки — ещё не получены</dd></div>` : ''}
+    ${gapsHtml(c)}
     <div class="kv"><dt>Создана</dt><dd>${dt(c.created_at).toLocaleString('ru-RU', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' })}</dd></div>
     ${rows || '<div class="empty" style="padding:24px 0">ИИ ещё не собрал данные</div>'}
     ${q ? `<div class="sect"><h4>Расчёт по прайсу</h4><div class="calc">
@@ -1078,12 +1141,42 @@ function leadHtml(c) {
     ${thumbs ? `<div class="sect"><h4>Фото от клиента (${photos.length})</h4><div class="thumbs">${thumbs}</div></div>` : ''}
     ${rooms ? `<div class="sect"><h4>Что видно на фото</h4>${rooms}</div>` : ''}
     ${c.summary ? `<div class="sect"><h4>Суть</h4><div class="quote" dir="auto">${esc(c.summary)}</div></div>` : ''}
+    <div class="sect"><h4>История этапов</h4><div class="hist" data-r="hist">загружаем…</div></div>
   </div>`;
 }
 
 function bindLead(root, convId) {
   const col = root.querySelector('[data-r="col"]');
-  if (col) col.onchange = () => moveTo(convId, col.value);
+  if (col) col.onchange = async () => {
+    if (!(await moveTo(convId, col.value))) col.value = columnOf(convs.find((x) => x.id === convId) || {});
+  };
+  const need = root.querySelector('[data-r="need"]');
+  if (need) need.onchange = async () => {
+    await api(`/api/conversations/${convId}/flag`, { method: 'POST', body: JSON.stringify({ needs_human: need.checked }) });
+    toast(need.checked ? 'Отмечено: нужен менеджер' : 'Флаг снят');
+    loadList();
+  };
+  const rv = root.querySelector('[data-a="reviewed"]');
+  if (rv) rv.onclick = async () => {
+    await api(`/api/conversations/${convId}/reviewed`, { method: 'POST', body: '{}' });
+    toast('Отмечено как проверенное');
+    loadList();
+    openConv(convId, drawerOpen);
+  };
+  const hist = root.querySelector('[data-r="hist"]');
+  if (hist) api(`/api/conversations/${convId}/audit`).then((rows) => {
+    const label = (v) => {
+      if (!v) return '—';
+      const [st, cl] = String(v).split(':');
+      return cl ? 'Закрыто · ' + colTitle(cl) : colTitle(st) !== st ? colTitle(st) : v;
+    };
+    const stageRows = rows.filter((r) => r.field === 'stage');
+    hist.innerHTML = stageRows.length ? stageRows.map((r) => `<div class="hist-row">
+        <span class="hist-when">${dt(r.at).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}</span>
+        <span class="hist-what">${r.actor === 'перенос' ? 'перенос в новую воронку →' : esc(label(r.old_value)) + ' →'} <b>${esc(label(r.new_value))}</b>
+          <small>${esc(r.actor)}${r.reason ? ' · ' + esc(r.reason) : ''}</small></span></div>`).join('')
+      : '<span class="muted">изменений пока не было</span>';
+  }).catch(() => { hist.textContent = ''; });
   const ta = root.querySelector('[data-r="note"]');
   if (ta) ta.onblur = async () => {
     await api(`/api/conversations/${convId}/note`, { method: 'POST', body: JSON.stringify({ note: ta.value }) });
@@ -1289,6 +1382,9 @@ function renderSettings() {
           + srow('В день уборки, в котором часу', '', unit('f-confirmmorning', s.confirm_morning_hour ?? 8, 'часов', 6, 12))
           + srow('Напомнить менеджеру о тихом диалоге', 'Диалоги, которые ведёт человек, бот не дожимает — вместо этого пишет менеджеру.',
             unit('f-mgrping', s.manager_ping_hours ?? 48, 'часов', 2, 336)))
+        + grp('Фото и видео', 'Для каких видов уборки материал обязателен. Пока клиент не прислал ни фото, ни видео, заявка помечается «Ждём фото/видео».',
+          MEDIA_SERVICES.map((v, i) => srow(v, '', `<label class="switch"><input type="checkbox" class="f-media" data-v="${esc(v)}" ${
+            String(s.media_required || '').split(',').map((x) => x.trim()).includes(v) ? 'checked' : ''}></label>`)).join(''))
         + grp('Промпт', 'Роль, стиль речи, что собирать по заявке, когда звать человека. Цены сюда не вписывайте — они в прайсе.',
           swide(`<textarea id="f-prompt" class="mono" dir="auto" rows="16">${esc(s.system_prompt || '')}</textarea>`))
     },
@@ -1505,6 +1601,7 @@ async function saveSettings() {
   if ($('#f-confirmon')) body.confirm_on = $('#f-confirmon').checked;
   put('#f-nudgestale', 'nudge_stale_hours'); put('#f-nudgeh', 'nudge_hours'); put('#f-nudgerep', 'nudge_repeat_hours'); put('#f-nudgemax', 'nudge_max');
   if ($('#f-nudgeon')) body.nudge_on = $('#f-nudgeon').checked;
+  if ($$('.f-media').length) body.media_required = $$('.f-media').filter((x) => x.checked).map((x) => x.dataset.v).join(', ');
   put('#f-managers', 'manager_numbers'); put('#f-adminurl', 'admin_url'); put('#f-sourcemap', 'source_map');
   put('#f-effort', 'ai_effort');
   if ($('#f-notifyon')) body.notify_on = $('#f-notifyon').checked;

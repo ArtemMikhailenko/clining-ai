@@ -1,4 +1,4 @@
-import { db, addMessage, getOrCreateConversation, getConversation, history, getSetting, messageExists, setSource } from './db.js';
+import { db, addMessage, getOrCreateConversation, getConversation, history, getSetting, messageExists, setSource, applyStage } from './db.js';
 import { generateReply } from './ai.js';
 import { channel, adapterFor } from './channels/index.js';
 import { detectLang } from './lang.js';
@@ -204,6 +204,7 @@ async function processOutgoing({ phone, text, wa_id, chat_id = null, media = [] 
   timers.delete(conv.id);
 
   const msg = addMessage(conv.id, { direction: 'out', author: 'human', body: text || '', wa_id, media });
+  if ((conv.stage || 'new') === 'new') applyStage(conv.id, 'clarify', { actor: 'менеджер' });
   db.prepare(`UPDATE conversations SET ai_enabled=0, status='human', needs_human=0,
     handoff_reason=NULL, unread=0, nudges=0 WHERE id=?`).run(conv.id);
   emit('message', { conv_id: conv.id, message: msg });
@@ -239,6 +240,14 @@ async function processIncoming({ phone, name, text, wa_id, chat_id = null, media
   const body = [text, said].filter(Boolean).join('\n');
 
   const msg = addMessage(conv.id, { direction: 'in', author: 'customer', body, wa_id, media });
+
+  // Клиент вернулся после проигрыша или оплаты — это снова живая заявка, а не
+  // строчка в архиве. Сотрудников и «обычные уборки» не поднимаем: бот им уже
+  // всё ответил. Отдельной сделкой повторный заказ станет на этапе 5.
+  if (conv.status === 'closed' && ['lost', 'paid'].includes(conv.close_reason)) {
+    applyStage(conv.id, 'clarify', { actor: 'система', why: 'клиент написал снова после закрытия' });
+    db.prepare('UPDATE conversations SET review=? WHERE id=?').run('клиент вернулся после закрытия', conv.id);
+  }
 
   // «не пишите мне» — выключаем все напоминания по этому диалогу навсегда
   if (isStopRequest(body)) {
@@ -409,10 +418,15 @@ async function respond(convId, ch, text) {
   // висеть в очереди «нужен человек» — менеджеру там ловить нечего. Ответ
   // клиенту всё равно уйдёт, а диалог сразу ложится в свою корзину архива.
   const bucket = routeBucket(out.route);
+  const stageNow = getConversation(conv.id)?.stage || 'new';
   if (bucket) {
-    db.prepare("UPDATE conversations SET status='closed', archive=?, needs_human=0, handoff_reason=NULL, nudge_stop=1, followup_at=NULL WHERE id=?")
-      .run(bucket, conv.id);
-    console.log(`[маршрут] диалог ${conv.id} → архив «${bucket}» (${out.route})`);
+    applyStage(conv.id, 'closed', { close: bucket === 'staff' ? 'unq_staff' : 'unq_regular', actor: 'бот', why: out.route });
+    db.prepare('UPDATE conversations SET handoff_reason=NULL, nudge_stop=1, followup_at=NULL WHERE id=?').run(conv.id);
+    console.log(`[маршрут] диалог ${conv.id} → закрыто, неквалифицировано (${out.route})`);
+  } else if (lead.stage === 'отказ' && ['new', 'clarify', 'offer'].includes(stageNow)) {
+    // клиент сам отказался: закрываем как проигранную, причина — со слов бота.
+    // Дальше согласования бот заявку не закрывает: там решение за менеджером
+    applyStage(conv.id, 'closed', { close: 'lost', lostReason: out.summary || 'клиент отказался', actor: 'бот' });
   } else if (out.needs_human) flagHuman(conv.id, out.handoff_reason || 'ИИ передал диалог');
   else if (ready) flagHuman(conv.id, 'заявка готова — посмотреть видео и назвать цену');
 
@@ -476,6 +490,8 @@ async function respond(convId, ch, text) {
     emit('message', { conv_id: conv.id, message: sent });
     if (err) break;
   }
+  // бот начал сбор данных — по ТЗ это выход из «Новой»
+  if ((getConversation(conv.id)?.stage || 'new') === 'new') applyStage(conv.id, 'clarify', { actor: 'бот' });
   emit('conversations', null);
 }
 

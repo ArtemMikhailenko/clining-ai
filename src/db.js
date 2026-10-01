@@ -2,6 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { legacyStage, STAGES, CLOSE } from './stages.js';
 
 const dir = path.join(process.cwd(), 'data');
 fs.mkdirSync(dir, { recursive: true });
@@ -82,6 +83,30 @@ if (!cols.includes('followup_at')) db.exec('ALTER TABLE conversations ADD COLUMN
 if (!cols.includes('followup_note')) db.exec('ALTER TABLE conversations ADD COLUMN followup_note TEXT');
 // «перезвонить 15.10» — это задача человеку, а не повод боту написать клиенту
 if (!cols.includes('followup_who')) db.exec('ALTER TABLE conversations ADD COLUMN followup_who TEXT');
+
+// Журнал изменений (ТЗ §4.2, §10): кто, когда, что было и что стало.
+// На этапе 1 пишут бот, перенос и менеджер без имени; учётки появятся на этапе 3.
+db.exec(`CREATE TABLE IF NOT EXISTS audit_log (
+  id        INTEGER PRIMARY KEY AUTOINCREMENT,
+  entity    TEXT NOT NULL,
+  entity_id INTEGER NOT NULL,
+  field     TEXT NOT NULL,
+  old_value TEXT,
+  new_value TEXT,
+  actor     TEXT NOT NULL,
+  reason    TEXT,
+  at        TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_log(entity, entity_id, id);`);
+
+// Воронка по ТЗ §3: этап сделки отдельно от того, кто ведёт диалог
+const needStages = !cols.includes('stage');
+if (needStages) {
+  db.exec('ALTER TABLE conversations ADD COLUMN stage TEXT');
+  db.exec('ALTER TABLE conversations ADD COLUMN close_reason TEXT');   // paid | lost | unq_regular | unq_staff
+  db.exec('ALTER TABLE conversations ADD COLUMN lost_reason TEXT');
+  db.exec('ALTER TABLE conversations ADD COLUMN review TEXT');         // почему перенос нужно проверить руками
+}
 if (!cols.includes('nudges')) db.exec('ALTER TABLE conversations ADD COLUMN nudges INTEGER NOT NULL DEFAULT 0');
 // клиент попросил не писать — больше никаких напоминаний по своей инициативе
 if (!cols.includes('nudge_stop')) db.exec('ALTER TABLE conversations ADD COLUMN nudge_stop INTEGER NOT NULL DEFAULT 0');
@@ -264,6 +289,9 @@ seed.run('notify_on', '1');
 seed.run('admin_url', '');
 // справочник кампаний: «ключ = Название». Ключ ищется в объявлении и первом сообщении
 seed.run('source_map', '');
+// ТЗ §2.1: для каких видов уборки фото/видео обязательны. Без них заявка
+// остаётся в «Уточнении» с флагом «Ждём фото/видео»
+seed.run('media_required', 'после ремонта, перед въездом, после выезда, генеральная');
 // Глубина обдумывания ответа: low | medium | high. Правится в админке на лету.
 // По умолчанию high: переписка с живым клиентом дороже сэкономленных центов,
 // а на низкой модель теряет нить в длинном диалоге.
@@ -339,6 +367,28 @@ for (const [key, value] of Object.entries(FRESH)) {
 // из-за которого в архиве висело «ждёт 15 ч». Дёшево и идемпотентно.
 db.exec("UPDATE conversations SET needs_human=0 WHERE status='closed' AND needs_human=1");
 
+
+// Перенос в новую воронку — один раз, при появлении колонки stage.
+// Каждое решение пишется в журнал, спорные получают пометку review.
+if (needStages) {
+  const before = db.prepare('SELECT count(*) n FROM conversations').get().n;
+  const tally = {};
+  for (const c of db.prepare('SELECT * FROM conversations').all()) {
+    const r = legacyStage(c);
+    db.prepare('UPDATE conversations SET stage=?, close_reason=?, lost_reason=?, review=? WHERE id=?')
+      .run(r.stage, r.close, r.lost_reason, r.review, c.id);
+    if (r.stage === 'closed') db.prepare("UPDATE conversations SET status='closed', needs_human=0 WHERE id=?").run(c.id);
+    const label = r.close ? `closed:${r.close}` : r.stage;
+    db.prepare(`INSERT INTO audit_log(entity, entity_id, field, old_value, new_value, actor, reason)
+      VALUES('lead', ?, 'stage', ?, ?, 'перенос', ?)`)
+      .run(c.id, `${c.status}/${JSON.parse(c.lead || '{}').stage || ''}`, label, r.review || r.lost_reason);
+    tally[label] = (tally[label] || 0) + 1;
+  }
+  const after = Object.values(tally).reduce((a, b) => a + b, 0);
+  console.log(`Перенос в новую воронку: ${before} заявок → ${after}`, JSON.stringify(tally));
+  if (before !== after) console.error('ВНИМАНИЕ: количество заявок до и после переноса не совпадает');
+}
+
 export const getSetting = (k) =>
   db.prepare('SELECT value FROM settings WHERE key = ?').get(k)?.value ?? null;
 
@@ -354,7 +404,7 @@ export function getOrCreateConversation(channel, phone, name, chatId = null) {
     return db.prepare('SELECT * FROM conversations WHERE id=?').get(found.id);
   }
   const { lastInsertRowid } = db
-    .prepare('INSERT INTO conversations(channel, phone, name, chat_id) VALUES(?,?,?,?)')
+    .prepare("INSERT INTO conversations(channel, phone, name, chat_id, stage) VALUES(?,?,?,?,'new')")
     .run(channel, phone, name ?? null, chatId);
   return db.prepare('SELECT * FROM conversations WHERE id=?').get(lastInsertRowid);
 }
@@ -395,11 +445,51 @@ export function setSource(convId, src) {
  * Стереть переписку и заявки, сохранив настройки, прайс и привязку WhatsApp.
  * Нужно перед запуском рекламы: тестовые диалоги портят и воронку, и отчёты.
  */
+/** Запись в журнал изменений. Значения храним строками, как увидит человек. */
+export function audit(entity, entityId, field, oldValue, newValue, actor, reason = null) {
+  if (String(oldValue ?? '') === String(newValue ?? '')) return;
+  db.prepare(`INSERT INTO audit_log(entity, entity_id, field, old_value, new_value, actor, reason)
+    VALUES(?,?,?,?,?,?,?)`).run(entity, entityId, field,
+    oldValue == null ? null : String(oldValue), newValue == null ? null : String(newValue), actor, reason);
+}
+
+const stageLabel = (stage, close) => (stage === 'closed' && close ? `closed:${close}` : stage || '');
+const ARCHIVE_OF = { lost: 'refused', unq_regular: 'later', unq_staff: 'staff', paid: null };
+
+/**
+ * Сменить этап заявки. Закрытие проставляет status='closed' — на нём держатся
+ * расписание, дожим и отчёты; переоткрытие отдаёт диалог человеку.
+ * Каждая смена пишется в журнал с автором и причиной.
+ */
+export function applyStage(convId, next, { close = null, lostReason = null, actor = 'система', why = null } = {}) {
+  const c = db.prepare('SELECT * FROM conversations WHERE id=?').get(convId);
+  if (!c) return null;
+  if (!STAGES.includes(next)) throw new Error('Неизвестный этап: ' + next);
+  if (next === 'closed' && !CLOSE.includes(close)) throw new Error('Закрытой заявке нужен подстатус');
+  if (next === 'closed' && close === 'lost' && !String(lostReason ?? '').trim()) {
+    throw new Error('Проигранной заявке нужна причина');
+  }
+  const set = {
+    stage: next,
+    close_reason: next === 'closed' ? close : null,
+    lost_reason: next === 'closed' && close === 'lost' ? String(lostReason).trim() : null,
+    archive: next === 'closed' ? ARCHIVE_OF[close] : null
+  };
+  if (next === 'closed') { set.status = 'closed'; set.needs_human = 0; }
+  else if (c.status === 'closed') set.status = 'human';
+  const keys = Object.keys(set);
+  db.prepare(`UPDATE conversations SET ${keys.map((k) => `${k}=?`).join(',')} WHERE id=?`)
+    .run(...keys.map((k) => set[k]), convId);
+  audit('lead', convId, 'stage', stageLabel(c.stage, c.close_reason), stageLabel(next, set.close_reason),
+    actor, why || set.lost_reason);
+  return db.prepare('SELECT * FROM conversations WHERE id=?').get(convId);
+}
+
 export function resetData() {
   const convs = db.prepare('SELECT count(*) n FROM conversations').get().n;
   const msgs = db.prepare('SELECT count(*) n FROM messages').get().n;
   const jobs = db.prepare('SELECT count(*) n FROM jobs').get().n;
-  db.exec('DELETE FROM messages; DELETE FROM conversations; DELETE FROM jobs;');
+  db.exec('DELETE FROM messages; DELETE FROM conversations; DELETE FROM jobs; DELETE FROM audit_log;');
   try { db.exec("DELETE FROM sqlite_sequence WHERE name IN ('messages','conversations','jobs')"); } catch {}
   let files = 0;
   const mediaDir = path.join(dir, 'media');
@@ -408,6 +498,24 @@ export function resetData() {
     try { fs.rmSync(path.join(mediaDir, f.name)); files++; } catch {}
   }
   return { conversations: convs, messages: msgs, jobs, files };
+}
+
+export const mediaRequired = () =>
+  new Set(String(getSetting('media_required') || '').split(',').map((x) => x.trim()).filter(Boolean));
+
+/**
+ * Флаг «Ждём фото/видео» (ТЗ §2.1): заявка ещё в работе до предложения, вид
+ * уборки требует материала, а клиент не прислал ни фото, ни видео. Бот может
+ * сам поставить стадию «ждём видео» — это тоже флаг.
+ */
+export function waitsMedia(c, need = mediaRequired()) {
+  if (!['new', 'clarify'].includes(c.stage || 'new')) return false;
+  let l = {};
+  try { l = JSON.parse(c.lead || '{}'); } catch {}
+  const visual = c.visual_count ?? db.prepare(`SELECT count(*) n FROM messages WHERE conv_id=? AND direction='in'
+    AND (media LIKE '%"kind":"image"%' OR media LIKE '%"kind":"video"%')`).get(c.id).n;
+  if (visual > 0) return false;
+  return l.stage === 'ждём видео' || need.has(l.service);
 }
 
 export const getConversation = (id) =>
@@ -419,7 +527,9 @@ export function listConversations() {
       (SELECT body FROM messages m WHERE m.conv_id = c.id ORDER BY m.id DESC LIMIT 1) AS last_body,
       -- когда клиент написал в последний раз: по нему считаем, сколько он уже ждёт
       (SELECT max(created_at) FROM messages m WHERE m.conv_id = c.id AND m.direction = 'in') AS last_in_at,
-      (SELECT count(*) FROM messages m WHERE m.conv_id = c.id AND m.media IS NOT NULL) AS media_count
+      (SELECT count(*) FROM messages m WHERE m.conv_id = c.id AND m.media IS NOT NULL) AS media_count,
+      (SELECT count(*) FROM messages m WHERE m.conv_id = c.id AND m.direction = 'in'
+        AND (m.media LIKE '%"kind":"image"%' OR m.media LIKE '%"kind":"video"%')) AS visual_count
     FROM conversations c
     ORDER BY c.needs_human DESC, c.last_at DESC
   `).all();
@@ -427,7 +537,9 @@ export function listConversations() {
   // превью фото прямо на карточке: для клининга снимок помещения — главный контекст
   const thumbs = db.prepare(`
     SELECT media FROM messages WHERE conv_id = ? AND media IS NOT NULL ORDER BY id DESC LIMIT 3`);
+  const need = mediaRequired();
   for (const c of rows) {
+    c.wait_media = waitsMedia(c, need);
     c.thumbs = c.media_count
       ? thumbs.all(c.id).flatMap((r) => JSON.parse(r.media)).filter((x) => x.kind !== 'audio').slice(0, 3)
       : [];
