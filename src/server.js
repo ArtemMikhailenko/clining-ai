@@ -1,5 +1,8 @@
 import express from 'express';
 import path from 'node:path';
+import fs from 'node:fs';
+import os from 'node:os';
+import { spawn } from 'node:child_process';
 import { db, listConversations, getConversation, history, getSetting, setSetting, addMessage, resetData } from './db.js';
 import { handleIncoming, sendAsHuman, suggestReply, subscribe, emit } from './bot.js';
 import * as botState from './bot.js';
@@ -561,6 +564,40 @@ app.post('/api/maintenance/reset', (req, res) => {
   emit('conversations', null);
   console.log(`Данные стёрты: диалогов ${gone.conversations}, сообщений ${gone.messages}, файлов ${gone.files}`);
   res.json(gone);
+});
+
+/**
+ * Резервная копия: база и присланные файлы одним архивом. Диск Render на этом
+ * тарифе не бэкапится, и до этой кнопки данные клиента жили в единственном
+ * экземпляре. Базу снимаем через VACUUM INTO — это целостный снимок даже
+ * посреди записи, в отличие от копирования файла. Ключи WhatsApp в архив
+ * не кладём: с ними можно увести сессию номера.
+ */
+app.get('/api/maintenance/export', (req, res) => {
+  const dataDir = path.join(process.cwd(), 'data');
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'backup-'));
+  const snap = path.join(tmp, 'app.db');
+  try {
+    db.exec(`VACUUM INTO '${snap.replace(/'/g, "''")}'`);
+  } catch (e) {
+    fs.rm(tmp, { recursive: true, force: true }, () => {});
+    return res.status(500).json({ error: 'не удалось снять копию базы: ' + e.message });
+  }
+  const stamp = new Intl.DateTimeFormat('sv-SE', { timeZone: scheduleSetting('timezone') }).format(new Date());
+  res.setHeader('Content-Type', 'application/gzip');
+  res.setHeader('Content-Disposition', `attachment; filename="backup-${stamp}.tar.gz"`);
+
+  const args = ['-czf', '-', '-C', tmp, 'app.db'];
+  if (fs.existsSync(path.join(dataDir, 'media'))) args.push('-C', dataDir, 'media');
+  const tar = spawn('tar', args);
+  tar.stdout.pipe(res);
+  tar.stderr.on('data', (d) => console.error('архив:', String(d).trim()));
+  tar.on('close', (code) => {
+    fs.rm(tmp, { recursive: true, force: true }, () => {});
+    if (code) console.error('резервная копия: tar завершился с кодом', code);
+    else console.log('Резервная копия выгружена');
+  });
+  req.on('close', () => { if (tar.exitCode === null) tar.kill(); });
 });
 
 app.post('/api/sim/incoming', async (req, res) => {
