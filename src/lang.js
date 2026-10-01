@@ -20,9 +20,17 @@ export function detectLang(text = '') {
  */
 export function dominantLang(messages = []) {
   const score = {};
-  const last = messages.filter((m) => m.direction === 'in' && m.body).slice(-5);
+  const inbound = messages.filter((m) => m.direction === 'in' && m.body);
+  const isVoice = (m) => String(m.media || '').includes('"audio"');
+  // Голосовое — самый ненадёжный признак языка: его язык угадывает само
+  // распознавание, и английскую речь с акцентом оно может записать кириллицей.
+  // Два таких голосовых подряд перевешивали английскую переписку, и бот
+  // переходил на русский посреди разговора. Поэтому если клиент хоть что-то
+  // писал текстом, язык диалога решает только текст.
+  const typed = inbound.filter((m) => !isVoice(m) && /\p{L}{2}/u.test(String(m.body)));
+  const last = (typed.length ? typed : inbound).slice(-5);
   for (const [i, m] of last.entries()) {
-    const voice = String(m.media || '').includes('"audio"');
+    const voice = isVoice(m);
     const text = String(m.body).trim();
     // Чем свежее сообщение, тем больше вес: клиент начал на иврите и перешёл на
     // русский — отвечать надо по-русски. Но короткое «ок» не должно перевешивать
