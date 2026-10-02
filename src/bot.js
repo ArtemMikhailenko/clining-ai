@@ -247,6 +247,9 @@ async function processIncoming({ phone, name, text, wa_id, chat_id = null, media
   const body = [text, said].filter(Boolean).join('\n');
 
   const msg = addMessage(conv.id, { direction: 'in', author: 'customer', body, wa_id, media });
+  // язык клиента — признак для отчёта по рекламе (ТЗ §9: фильтр по языку)
+  const lang = dominantLang(history(conv.id, 12));
+  if (lang) db.prepare('UPDATE conversations SET lang=? WHERE id=?').run(lang, conv.id);
 
   // Клиент вернулся после проигрыша или оплаты — это снова живая заявка, а не
   // строчка в архиве. Сотрудников и «обычные уборки» не поднимаем: бот им уже

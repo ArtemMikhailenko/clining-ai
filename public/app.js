@@ -207,6 +207,7 @@ const PAGES = {
               tools: leadsTools },
   cal:      { title: 'Расписание', tpl: 'tpl-cal',  render: renderCal,   tools: calTools },
   control:  { title: 'Контроль дня', tpl: null,     render: renderControl, tools: controlTools },
+  report:   { title: 'Отчёт',        tpl: null,     render: renderReport, tools: reportTools },
   settings: { title: 'Настройки', tpl: null,        render: renderSettings, tools: () => '' }
 };
 
@@ -1221,6 +1222,23 @@ function warnHtml(c) {
   return list.length ? `<div class="warns">${list.map((w) => `<span class="warn-i ${w.level}">${esc(w.text)}</span>`).join('')}</div>` : '';
 }
 
+/** Источник (ТЗ §4.1, §5): цепочка до объявления, статус атрибуции, ссылка в Ads Manager. */
+function sourceHtml(c) {
+  if (!c.source && !c.attr_status) return '';
+  const st = c.attr_status || 'organic';
+  const chain = [c.campaign_name, c.adset_name, c.ad_name || c.source_title].filter(Boolean);
+  const acc = state.meta_account;
+  const am = c.ad_id && acc ? `https://adsmanager.facebook.com/adsmanager/manage/ads?act=${encodeURIComponent(acc)}&selected_ad_ids=${encodeURIComponent(c.ad_id)}` : '';
+  return `<div class="kv src"><dt>Источник</dt><dd dir="auto">
+      <span>${esc((state.platform_title || {})[c.platform] || c.source || '—')}</span>
+      <span class="attr ${st}" title="${esc(c.attr_reason || '')}">${esc((state.attr_title || {})[st] || st)}</span>
+      ${chain.length ? `<div class="src-chain">${chain.map(esc).join(' › ')}</div>` : ''}
+      ${c.creative_name ? `<div class="src-sub">креатив: ${esc(c.creative_name)}</div>` : ''}
+      ${c.ad_id ? `<div class="src-sub">объявление № ${esc(c.ad_id)}${am ? ` · <a href="${esc(am)}" target="_blank" rel="noopener">открыть в Ads Manager</a>` : ''}</div>` : ''}
+      ${c.attr_reason && st !== 'exact' ? `<div class="src-sub">${esc(c.attr_reason)}</div>` : ''}
+    </dd></div>`;
+}
+
 /** Чужая или ничья заявка: менеджер сначала берёт её себе — это видно в журнале. */
 function takeHtml(c) {
   const u = me();
@@ -1416,9 +1434,7 @@ function leadHtml(c) {
     <div class="kv"><dt>Записан на</dt><dd>${c.job_date
       ? esc(c.job_date + (c.job_time ? ', ' + c.job_time : '')) + ' <span class="ok-tag">подтверждено</span>'
       : '<span class="muted">не записан — дату подтверждает менеджер</span>'}</dd></div>
-    ${c.source ? `<div class="kv"><dt>Источник</dt><dd dir="auto">${c.source_url
-      ? `<a href="${esc(c.source_url)}" target="_blank" rel="noopener">${esc(c.source)}</a>` : esc(c.source)}${
-      c.source_title ? ` · ${esc(c.source_title)}` : ''}</dd></div>` : ''}
+    ${sourceHtml(c)}
     ${c.nudges ? `<div class="kv"><dt>Напоминаний</dt><dd>${c.nudges}</dd></div>` : ''}
     ${c.wait_media ? `<div class="kv gap"><dt>Фото/видео</dt><dd>нужны для этого вида уборки — ещё не получены</dd></div>` : ''}
     ${gapsHtml(c)}
@@ -1670,6 +1686,123 @@ function ctlRow(r) {
   </tr>`;
 }
 
+/* ───── отчёт по рекламе и продажам (ТЗ §9) ───── */
+let rep = null;
+const repQ = { days: 30, from: '', to: '', group: 'ad' };
+const REP_COLS = [
+  ['leads', 'Заявки'], ['qualified', 'Квалиф.'], ['called', 'Обзвонено'], ['answered', 'Дозвонились'],
+  ['quoted', 'Предложение'], ['agreed', 'Согласовано'], ['paid', 'Оплачено']
+];
+const REP_DEF = {
+  leads: 'Уникальные заявки, созданные за период',
+  qualified: 'Не отсеяна как обычная уборка или сотрудник, известны город, объект и площадь',
+  called: 'Есть хотя бы одна попытка звонка',
+  answered: 'Есть разговор с клиентом',
+  quoted: 'Менеджер сохранил окончательную цену',
+  agreed: 'Клиент подтвердил цену и дату',
+  paid: 'Внесена оплата'
+};
+const fmtMoney = (v, cur = '₪') => (v == null ? '—' : `${Math.round(v).toLocaleString('ru-RU')} ${cur === 'ILS' ? '₪' : cur}`);
+
+function reportTools() {
+  return `<div class="seg" id="rep-days">${[[7, '7 дней'], [30, '30 дней'], [90, '90 дней'], [0, 'период']]
+    .map(([d, t]) => `<button data-d="${d}" class="${repQ.days === d ? 'on' : ''}">${t}</button>`).join('')}</div>
+    <span class="rep-range" ${repQ.days ? 'hidden' : ''}><input type="date" id="rep-from" value="${repQ.from}">–<input type="date" id="rep-to" value="${repQ.to}"></span>`;
+}
+
+function bindReportTools() {
+  $$('#rep-days button').forEach((b) => b.onclick = () => {
+    repQ.days = Number(b.dataset.d);
+    if (!repQ.days && !repQ.from) {
+      const t = new Date(); repQ.to = new Intl.DateTimeFormat('sv-SE').format(t);
+      t.setDate(t.getDate() - 29); repQ.from = new Intl.DateTimeFormat('sv-SE').format(t);
+    }
+    go('report');
+  });
+  $('#rep-from') && ($('#rep-from').onchange = (e) => { repQ.from = e.target.value; renderReport(); });
+  $('#rep-to') && ($('#rep-to').onchange = (e) => { repQ.to = e.target.value; renderReport(); });
+}
+
+async function renderReport() {
+  if (!$('#rep')) $('#content').innerHTML = '<div class="rep" id="rep"><div class="empty">считаем…</div></div>';
+  bindReportTools();
+  const p = new URLSearchParams();
+  if (repQ.days) {
+    const t = new Date(); p.set('to', new Intl.DateTimeFormat('sv-SE').format(t));
+    t.setDate(t.getDate() - (repQ.days - 1)); p.set('from', new Intl.DateTimeFormat('sv-SE').format(t));
+  } else { if (repQ.from) p.set('from', repQ.from); if (repQ.to) p.set('to', repQ.to); }
+  p.set('group', repQ.group);
+  for (const k of ['campaign', 'adset', 'ad', 'platform', 'attr', 'manager', 'lang', 'service', 'city']) if (repQ[k]) p.set(k, repQ[k]);
+  try { rep = await api('/api/report?' + p); } catch (e) { $('#rep').innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  if (page !== 'report') return;
+  const r = rep, t = r.totals, cur = r.currency;
+  const d1 = new Date(r.from + 'T12:00:00Z'), d2 = new Date(r.to + 'T12:00:00Z');
+  const f = (d) => d.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' });
+  $('#pg-sub').textContent = `${f(d1)} — ${f(d2)}`;
+
+  const filt = Object.entries(r.dims).map(([k, title]) => {
+    const opts = r.options[k] || [];
+    if (!opts.length && !repQ[k]) return '';
+    return `<label class="rep-f ${repQ[k] ? 'on' : ''}"><span>${esc(title)}</span><select data-f="${k}"><option value="">все</option>${
+      opts.map((o) => `<option value="${esc(o.value)}" ${repQ[k] === o.value ? 'selected' : ''}>${esc(o.label)}</option>`).join('')}</select></label>`;
+  }).join('');
+  const num = (ids, v, cls = '') => `<button class="rep-n ${cls}" data-ids="${ids.join(',')}" ${ids.length ? '' : 'disabled'}>${v}</button>`;
+  const tile = (k, title) => `<div class="rep-k" title="${esc(REP_DEF[k])}"><span>${title}</span>${num(t.ids[k], t[k])}
+    ${k !== 'leads' && t.leads ? `<small>${Math.round(t[k] / t.leads * 100)}%</small>` : '<small>&nbsp;</small>'}</div>`;
+  const money = (title, v, hint = '') => `<div class="rep-k money" title="${esc(hint)}"><span>${title}</span><b>${v}</b><small>${esc(hint) || '&nbsp;'}</small></div>`;
+
+  $('#rep').innerHTML = `
+    <div class="rep-filters">${filt}${Object.keys(r.dims).some((k) => repQ[k]) ? '<button class="btn ghost sm" id="rep-clear">Сбросить фильтры</button>' : ''}</div>
+    <div class="rep-kpis">${REP_COLS.map(([k, tt]) => tile(k, tt)).join('')}</div>
+    <div class="rep-kpis money">
+      ${money('Выручка', fmtMoney(t.revenue, '₪'), t.revenue && t.revenue_net !== t.revenue ? `без НДС ${fmtMoney(t.revenue_net, '₪')}` : '')}
+      ${money('Расход на рекламу', fmtMoney(t.spend, cur), t.spend == null ? 'не делится по этому фильтру' : !t.spend ? 'нет данных о расходе' : '')}
+      ${money('CPL · цена заявки', fmtMoney(t.cpl, cur))}
+      ${money('CAC · цена клиента', fmtMoney(t.cac, cur))}
+      ${money('ROAS', t.roas == null ? '—' : t.roas.toLocaleString('ru-RU') + '×', 'выручка на 1 ₪ рекламы')}
+    </div>
+    ${[r.spend_note, r.vat_note].filter(Boolean).map((n) => `<div class="rep-note">${esc(n)}</div>`).join('')}
+    <div class="rep-head"><h3>Разбивка</h3><div class="seg" id="rep-group">${Object.entries(r.dims).map(([k, tt]) =>
+      `<button data-g="${k}" class="${r.group === k ? 'on' : ''}">${esc(tt)}</button>`).join('')}</div></div>
+    ${r.breakdown.length ? `<div class="ctl-wrap"><table class="ctl-t rep-t"><thead><tr><th>${esc(r.group_title)}</th>
+      ${REP_COLS.map(([, tt]) => `<th class="num">${tt}</th>`).join('')}<th class="num">Выручка</th><th class="num">Расход</th>
+      <th class="num">CPL</th><th class="num">CAC</th><th class="num">ROAS</th></tr></thead>
+      <tbody>${r.breakdown.map((b) => `<tr><td dir="auto"><b>${esc(b.label)}</b>${b.key && b.key !== b.label && /^\\d{6,}$/.test(b.key) ? `<small>№ ${esc(b.key)}</small>` : ''}</td>
+        ${REP_COLS.map(([k]) => `<td class="num">${num(b.ids[k], b[k], 'sm')}</td>`).join('')}
+        <td class="num">${b.revenue ? fmtMoney(b.revenue, '₪') : '—'}</td><td class="num">${fmtMoney(b.spend, cur)}</td>
+        <td class="num">${fmtMoney(b.cpl, cur)}</td><td class="num">${fmtMoney(b.cac, cur)}</td>
+        <td class="num">${b.roas == null ? '—' : b.roas.toLocaleString('ru-RU') + '×'}</td></tr>`).join('')}</tbody></table></div>`
+      : '<div class="empty">За период заявок нет</div>'}
+    <div class="rep-list" id="rep-list" hidden></div>`;
+
+  $$('#rep [data-f]').forEach((s) => s.onchange = () => { repQ[s.dataset.f] = s.value; renderReport(); });
+  $('#rep-clear') && ($('#rep-clear').onclick = () => { for (const k of Object.keys(r.dims)) repQ[k] = ''; renderReport(); });
+  $$('#rep-group button').forEach((b) => b.onclick = () => { repQ.group = b.dataset.g; renderReport(); });
+  $$('#rep .rep-n').forEach((b) => b.onclick = () => showRepList(b.dataset.ids.split(',').filter(Boolean), b));
+}
+
+/** Из чего сложилось число: те самые заявки, клик открывает карточку. */
+async function showRepList(ids, btn) {
+  const box = $('#rep-list');
+  if (!ids.length) return;
+  $$('#rep .rep-n.on').forEach((x) => x.classList.remove('on'));
+  btn.classList.add('on');
+  box.hidden = false;
+  box.innerHTML = '<div class="empty">загружаем…</div>';
+  const rows = await api('/api/report/leads', { method: 'POST', body: JSON.stringify({ ids }) });
+  const stage = (c) => (c.stage === 'closed' ? 'Закрыто · ' + colTitle(c.close_reason) : colTitle(c.stage));
+  box.innerHTML = `<div class="rep-list-h"><b>${rows.length} ${plural(rows.length, 'заявка', 'заявки', 'заявок')}</b>
+      <button class="btn ghost sm" id="rep-list-x">Скрыть</button></div>
+    <table class="log-t"><tbody>${rows.map((c) => `<tr data-conv="${c.id}"><td class="num">${dt(c.created_at).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' })}</td>
+      <td dir="auto"><b>${esc(c.lead_name || c.name || '+' + c.phone)}</b><small>+${esc(c.phone)}</small></td>
+      <td>${esc(stage(c))}</td><td>${esc([c.service, c.city].filter(Boolean).join(' · '))}</td>
+      <td dir="auto">${esc(c.ad_name || c.campaign_name || '')}</td>
+      <td class="num">${c.paid_sum ? fmtMoney(c.paid_sum) : c.deal_sum ? fmtMoney(c.deal_sum) + '<small>предложение</small>' : ''}</td></tr>`).join('')}</tbody></table>`;
+  $('#rep-list-x').onclick = () => { box.hidden = true; btn.classList.remove('on'); };
+  $$('tr[data-conv]', box).forEach((tr) => tr.onclick = () => { current = Number(tr.dataset.conv); go('inbox'); });
+  box.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
 /* ───── настройки ───── */
 const SET_SECTIONS = [
   { k:'company', t:'Компания', d:'название и часовой пояс',
@@ -1703,6 +1836,49 @@ const ACCESS_T = { login: 'вход', login_failed: 'неудачный вход
   backup_export: 'скачал резервную копию', data_reset: 'стёр данные', password_set: 'задал пароль' };
 const KIND_T = { notify: 'уведомление команде', whatsapp: 'сообщение клиенту', ai: 'модель ИИ', stt: 'расшифровка голоса' };
 const STATUS_T = { retry: 'повторяем', done: 'доставлено повторно', failed: 'не удалось' };
+
+async function loadMetaBox() {
+  const box = $('#f-meta');
+  try {
+    const m = await api('/api/meta/status');
+    const when = (s) => (s ? new Date(s).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—');
+    box.innerHTML = `<div class="meta-st ${m.configured ? (m.last_error ? 'bad' : 'ok') : 'off'}">
+        <b>${m.configured ? (m.last_error ? 'Ошибка обмена с Meta' : 'Подключено') : !m.has_token ? 'Не подключено: на сервере нет токена' : 'Не подключено: укажите рекламный аккаунт'}</b>
+        <span>${m.configured ? `последняя загрузка: ${when(m.last_sync)} · объявлений в справочнике: ${m.ads_known} · дней с расходом: ${m.spend_days}` : 'Пока без доступа: в отчёте объявления видны по заголовку, расход можно внести вручную ниже.'}</span>
+        ${m.last_error ? `<span class="err">${esc(m.last_error)}</span>` : ''}
+      </div>${m.configured ? '<button class="btn sm" id="f-metasync">Загрузить сейчас</button>' : ''}`;
+    $('#f-metasync') && ($('#f-metasync').onclick = async (e) => {
+      e.target.disabled = true; e.target.textContent = 'Загружаем…';
+      try { const r = await api('/api/meta/sync', { method: 'POST', body: '{}' }); toast(`Загружено строк расхода: ${r.rows ?? 0}`); }
+      catch (err) { toast(err.message, true); }
+      loadMetaBox();
+    });
+  } catch (e) { box.textContent = e.message; }
+}
+
+async function loadSpendBox() {
+  const box = $('#f-spend');
+  const rows = await api('/api/spend').catch(() => []);
+  const today = new Intl.DateTimeFormat('sv-SE').format(new Date());
+  box.innerHTML = `<div class="spend-add"><input type="date" id="sp-date" value="${today}">
+      <input type="text" id="sp-camp" placeholder="кампания" list="sp-camps"><datalist id="sp-camps">${[...new Set(rows.map((r) => r.campaign_name))].map((n) => `<option value="${esc(n)}">`).join('')}</datalist>
+      <div class="unit"><input type="number" id="sp-sum" min="0" step="0.01" placeholder="0"><span>₪</span></div>
+      <button class="btn sm" id="sp-add">Добавить</button></div>
+    ${rows.length ? `<table class="log-t"><tbody>${rows.map((r) => `<tr><td class="num">${esc(r.date)}</td><td dir="auto">${esc(r.campaign_name)}</td>
+      <td class="num">${fmtMoney(r.spend)}</td><td class="muted">${esc(r.created_by || '')}</td>
+      <td><button class="linkbtn" data-spdel="${r.id}">удалить</button></td></tr>`).join('')}</tbody></table>` : ''}`;
+  $('#sp-add').onclick = async () => {
+    try {
+      await api('/api/spend', { method: 'POST', body: JSON.stringify({ date: $('#sp-date').value, campaign_name: $('#sp-camp').value, amount: $('#sp-sum').value }) });
+      toast('Расход добавлен'); loadSpendBox();
+    } catch (e) { toast(e.message, true); }
+  };
+  $$('[data-spdel]', box).forEach((b) => b.onclick = async () => {
+    try { await api(`/api/spend/${b.dataset.spdel}`, { method: 'DELETE' }); loadSpendBox(); } catch (e) { toast(e.message, true); }
+  });
+  // поля расхода не относятся к общей кнопке «Сохранить»
+  box.addEventListener('input', (e) => e.stopPropagation());
+}
 
 async function loadLogs(q = '') {
   const box = $('#f-logs');
@@ -1912,8 +2088,20 @@ function renderSettings() {
         <div id="f-logs" class="logs">загружаем…</div>`
     },
     ads: {
-      lead: 'Клик по рекламе в Facebook или Instagram приносит вместе с первым сообщением карточку объявления: заголовок, ссылку и id клика. Название кампании из рекламного кабинета WhatsApp не передаёт — его задаёт справочник ниже.',
-      body: grp('Справочник кампаний', 'По строке на кампанию: <code>ключ = Название</code>. Ключ ищется в заголовке объявления, в ссылке, в id клика, в метке и в первом сообщении клиента — подойдёт любой кусок текста, который есть только у этого объявления. Совпало — в заявке будет название кампании. Первая подходящая строка выигрывает.',
+      lead: 'Клик по рекламе в Facebook или Instagram приносит с первым сообщением номер объявления. По нему CRM берёт из кабинета Meta названия кампании, группы и объявления и расходы по дням — для отчёта.',
+      body: grp('Кабинет Meta', 'Доступ только на чтение: токен системного пользователя с правом ads_read. Токен — секрет, он задаётся на сервере в переменной META_ADS_TOKEN, а не здесь.',
+          '<div id="f-meta" class="metabox">проверяем…</div>'
+          + srow('Рекламный аккаунт', 'Номер вида act_1234567890 из Ads Manager.',
+            `<input type="text" id="f-metaacc" class="mono" value="${esc(s.meta_ad_account || '')}" placeholder="act_1234567890">`)
+          + srow('Загружать расходы с', 'С какого дня брать историю. Пусто — за последние 90 дней.',
+            `<input type="date" id="f-metasince" value="${esc(s.meta_spend_since || '')}">`))
+        + grp('Выручка и НДС', 'Расход в Meta указан без НДС. Чтобы ROAS был честным, выручку для него считаем без НДС.',
+          srow('Суммы в CRM вносятся с НДС', 'Окончательная цена и оплата в карточках.',
+            `<label class="switch"><input type="checkbox" id="f-vatwith" ${s.amounts_with_vat !== false ? 'checked' : ''}></label>`)
+          + srow('Ставка НДС', '', unit('f-vatrate', s.vat_rate ?? 18, '%', 0, 30)))
+        + grp('Расход вручную', 'Пока кабинет не подключён или для другой площадки: день, кампания, сумма. В отчёте сложится с расходом из Meta.',
+          '<div id="f-spend" class="spendbox">загружаем…</div>')
+        + grp('Справочник кампаний', 'По строке на кампанию: <code>ключ = Название</code>. Ключ ищется в заголовке объявления, в ссылке, в id клика, в метке и в первом сообщении клиента — подойдёт любой кусок текста, который есть только у этого объявления. Совпало — в заявке будет название кампании. Первая подходящая строка выигрывает.',
           swide(`<textarea id="f-sourcemap" class="mono" rows="7" placeholder="ашдод после ремонта = Ашдод · после ремонта&#10;#ig1 = Instagram · сторис&#10;utm_campaign=win = Окна, сентябрь">${esc(s.source_map || '')}</textarea>`))
         + grp('Что реально приходило', 'Последние объявления и метки, с которых писали клиенты. Отсюда удобно взять ключ для справочника.',
           swide('<div id="f-srclist" class="srclist">загружаем…</div>'))
@@ -1973,6 +2161,8 @@ function renderSettings() {
     priceExample();
   }
   if ($('#f-hours')) renderHourRows(state.work_hours || {});
+  if ($('#f-meta')) loadMetaBox();
+  if ($('#f-spend')) loadSpendBox();
   if ($('#f-logs')) {
     $$('[data-log]').forEach((b) => b.onclick = () => { logTab = b.dataset.log; renderSettings(); });
     let t;
@@ -2103,6 +2293,8 @@ async function saveSettings() {
   if ($('#f-nudgeon')) body.nudge_on = $('#f-nudgeon').checked;
   if ($$('.f-media').length) body.media_required = $$('.f-media').filter((x) => x.checked).map((x) => x.dataset.v).join(', ');
   put('#f-adminurl', 'admin_url'); put('#f-sourcemap', 'source_map');
+  put('#f-metaacc', 'meta_ad_account'); put('#f-metasince', 'meta_spend_since'); put('#f-vatrate', 'vat_rate');
+  if ($('#f-vatwith')) body.amounts_with_vat = $('#f-vatwith').checked;
   put('#f-effort', 'ai_effort');
   if ($('#f-notifyon')) body.notify_on = $('#f-notifyon').checked;
   put('#f-prompt', 'system_prompt'); put('#f-blocked', 'blocked_numbers'); put('#f-quick', 'quick_replies');
@@ -2197,7 +2389,7 @@ async function loadState() {
 /** Что видно по роли (ТЗ §4.3): менеджеру не показываем настройки и тестовый симулятор. */
 function applyRole() {
   const owner = isOwner();
-  $$('a[data-p="settings"], #nav-sim').forEach((a) => { a.hidden = !owner; });
+  $$('a[data-p="settings"], a[data-p="report"], #nav-sim').forEach((a) => { a.hidden = !owner; });
   const box = $('#sf-me');
   if (!box) return;
   const u = me();

@@ -20,6 +20,9 @@ import { runAs } from './context.js';
 import { ADMIN, authEnabled, sessionUser, basicUser, readCookie, setCookie, login, logout, changeOwnPassword,
   setPassword, dropSessions, recUrl, recValid } from './auth.js';
 import { listFailures, retryNow, startRetries } from './integrations.js';
+import { buildReport, leadList } from './report.js';
+import { syncMeta, metaStatus, startMeta, accountId as metaAccount } from './meta.js';
+import { ATTR_TITLE, PLATFORM_TITLE } from './attribution.js';
 import { localDate } from './schedule.js';
 import { listManagers, saveManager, deleteManager, getManager, setManager, assignHandoff, clearCallDue,
   listCalls, logCall, saveRecording, sweepRecordings, overdueCalls, CALL_STATUS, recordingFile, deleteRecording,
@@ -69,7 +72,8 @@ const OWNER_ONLY = [
   ['POST', /^\/api\/state$/], ['POST', /^\/api\/managers$/], ['DELETE', /^\/api\/managers\/\d+$/],
   ['*', /^\/api\/maintenance\//], ['POST', /^\/api\/wa\/(pair|logout|restart)$/], ['POST', /^\/api\/sim\//],
   ['GET', /^\/api\/logs\//], ['POST', /^\/api\/logs\//], ['POST', /^\/api\/conversations\/\d+\/(delete|restore)$/],
-  ['GET', /^\/api\/conversations\/deleted$/], ['*', /^\/api\/calls\/\d+\/recording/]
+  ['GET', /^\/api\/conversations\/deleted$/], ['*', /^\/api\/calls\/\d+\/recording/],
+  ['*', /^\/api\/report/], ['*', /^\/api\/meta\//], ['*', /^\/api\/spend/]
 ];
 const CONV_WRITE = /^\/api\/conversations\/(\d+)\/(lead|note|send|mode|stage|flag|reviewed|next|calls|status)$/;
 
@@ -191,6 +195,12 @@ app.get('/api/state', (req, res) => {
     managers: listManagers(),
     me: req.user,
     me_auth: authEnabled(),
+    meta_ad_account: getSetting('meta_ad_account') || '',
+    meta_account: metaAccount(),
+    meta_spend_since: getSetting('meta_spend_since') || '',
+    amounts_with_vat: (getSetting('amounts_with_vat') ?? '1') === '1',
+    vat_rate: Number(getSetting('vat_rate')) || 18,
+    attr_title: ATTR_TITLE, platform_title: PLATFORM_TITLE,
     call_status: CALL_STATUS,
     ai_effort: getSetting('ai_effort') || process.env.AI_EFFORT || 'low',
     stt_label: sttLabel(),
@@ -234,6 +244,13 @@ app.post('/api/state', (req, res) => {
   if ('source_map' in req.body) setSetting('source_map', String(req.body.source_map));
   if ('media_required' in req.body) setSetting('media_required', String(req.body.media_required));
   if ('evening_report' in req.body) setSetting('evening_report', req.body.evening_report ? '1' : '0');
+  if ('amounts_with_vat' in req.body) setSetting('amounts_with_vat', req.body.amounts_with_vat ? '1' : '0');
+  if ('vat_rate' in req.body) setSetting('vat_rate', String(Math.min(30, Math.max(0, Number(req.body.vat_rate) || 0))));
+  if ('meta_ad_account' in req.body) setSetting('meta_ad_account', String(req.body.meta_ad_account || '').trim().replace(/^act_/, ''));
+  if ('meta_spend_since' in req.body) {
+    const d = String(req.body.meta_spend_since || '').trim();
+    if (!d || /^\d{4}-\d{2}-\d{2}$/.test(d)) setSetting('meta_spend_since', d);
+  }
   for (const [k, lo, hi] of [['call_sla_min', 1, 240], ['rec_max_mb', 1, 200], ['rec_keep_days', 0, 3650],
     ['offer_wait_hours', 1, 720], ['media_wait_hours', 1, 720]]) {
     if (k in req.body) setSetting(k, String(Math.min(hi, Math.max(lo, Math.round(Number(req.body[k]) || 0)))));
@@ -489,7 +506,13 @@ app.post('/api/conversations/:id/lead', (req, res) => {
     // source_raw (что прислала Meta) не трогаем никогда — правится только отображаемое имя
     const src = String(req.body.source ?? '').trim() || null;
     db.prepare('UPDATE conversations SET source=? WHERE id=?').run(src, id);
-    audit('lead', id, 'source', conv.source, src, 'менеджер', String(req.body.source_reason ?? '').trim() || null);
+    const why = String(req.body.source_reason ?? '').trim() || null;
+    audit('lead', id, 'source', conv.source, src, 'менеджер', why);
+    // источник указал человек — атрибуция «вручную»; что прислала Meta, остаётся в source_raw
+    if (src !== (conv.source ?? null)) {
+      db.prepare("UPDATE conversations SET attr_status='manual', attr_reason=? WHERE id=?").run(why, id);
+      audit('lead', id, 'attr_status', conv.attr_status, 'manual', 'менеджер', why);
+    }
   }
   db.prepare('UPDATE conversations SET lead=? WHERE id=?').run(JSON.stringify(lead), id);
 
@@ -744,6 +767,38 @@ app.post('/api/calls/:id/recording/restore', (req, res) => {
   catch (e) { res.status(400).json({ error: e.message }); }
 });
 
+/* ─────────── Реклама и отчёт (этап 4, ТЗ §5, §9) ─────────── */
+app.get('/api/report', (req, res) => res.json(buildReport(req.query)));
+app.post('/api/report/leads', (req, res) => res.json(leadList(req.body?.ids)));
+app.get('/api/meta/status', (req, res) => res.json(metaStatus()));
+app.post('/api/meta/sync', async (req, res) => {
+  try { res.json(await syncMeta()); } catch (e) { res.status(400).json({ error: e.message }); }
+});
+/* Расход, внесённый руками: пока нет доступа к кабинету или для другой площадки */
+app.get('/api/spend', (req, res) => {
+  res.json(db.prepare("SELECT * FROM ad_spend WHERE source='manual' ORDER BY date DESC, id DESC LIMIT 200").all());
+});
+app.post('/api/spend', (req, res) => {
+  const b = req.body || {};
+  const date = String(b.date || '');
+  const amount = Number(String(b.amount ?? '').replace(',', '.'));
+  const campaign = String(b.campaign_name || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'Дата — ГГГГ-ММ-ДД' });
+  if (!(amount > 0)) return res.status(400).json({ error: 'Сумма расхода больше нуля' });
+  if (!campaign) return res.status(400).json({ error: 'К какой кампании относится расход?' });
+  const r = db.prepare(`INSERT INTO ad_spend(date, campaign_name, spend, currency, source, note, created_by)
+    VALUES(?,?,?,'ILS','manual',?,?)`).run(date, campaign, amount, String(b.note || '').trim() || null, req.user?.name || null);
+  audit('spend', Number(r.lastInsertRowid), 'spend', null, `${date} · ${campaign} · ${amount}`, 'менеджер');
+  res.json({ ok: true });
+});
+app.delete('/api/spend/:id', (req, res) => {
+  const row = db.prepare("SELECT * FROM ad_spend WHERE id=? AND source='manual'").get(Number(req.params.id));
+  if (!row) return res.sendStatus(404);
+  db.prepare('DELETE FROM ad_spend WHERE id=?').run(row.id);
+  audit('spend', row.id, 'spend', `${row.date} · ${row.campaign_name} · ${row.spend}`, null, 'менеджер', 'удалён');
+  res.json({ ok: true });
+});
+
 /* Журналы для владельца: изменения, доступ, сбои */
 app.get('/api/logs/audit', (req, res) => {
   const q = String(req.query.q || '').trim();
@@ -990,6 +1045,7 @@ setInterval(async () => {
 }, 6e4).unref?.();
 setInterval(() => { sweepRecordings(); purgeTrash(); }, 36e5).unref?.();
 startRetries();
+startMeta();
 startControl();
 
 app.listen(PORT, async () => {

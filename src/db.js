@@ -4,6 +4,8 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { legacyStage, STAGES, CLOSE } from './stages.js';
 import { currentUser } from './context.js';
+import { classifySource } from './attribution.js';
+import { dominantLang } from './lang.js';
 
 const dir = path.join(process.cwd(), 'data');
 fs.mkdirSync(dir, { recursive: true });
@@ -205,6 +207,44 @@ if (!cols.includes('next_action')) {
   if (moved) console.log(`Следующее действие: перенесено ${moved} напоминаний менеджеру`);
 }
 if (!cols.includes('stage_at')) db.exec('ALTER TABLE conversations ADD COLUMN stage_at TEXT');   // когда сменился этап
+// Атрибуция рекламы (ТЗ §5): цепочка до объявления и статус, насколько ей можно верить.
+// source_raw — то, что прислала Meta, — не меняется никогда; разобранное лежит рядом
+const needAttr = !cols.includes('attr_status');
+if (needAttr) {
+  for (const c of ['attr_status', 'attr_reason', 'platform', 'ad_id', 'ad_name', 'adset_id', 'adset_name',
+    'campaign_id', 'campaign_name', 'creative_id', 'creative_name', 'ctwa_clid', 'first_touch_at']) {
+    db.exec(`ALTER TABLE conversations ADD COLUMN ${c} TEXT`);
+  }
+}
+if (!cols.includes('lang')) db.exec('ALTER TABLE conversations ADD COLUMN lang TEXT');   // язык клиента — для отчёта
+
+// Справочник объявлений из кабинета Meta и расходы по дням (этап 4)
+db.exec(`CREATE TABLE IF NOT EXISTS meta_ads (
+  ad_id         TEXT PRIMARY KEY,
+  name          TEXT,
+  adset_id      TEXT, adset_name    TEXT,
+  campaign_id   TEXT, campaign_name TEXT,
+  creative_id   TEXT, creative_name TEXT,
+  account_id    TEXT,
+  fetched_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS ad_spend (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  date          TEXT NOT NULL,              -- день в часовом поясе рекламного аккаунта
+  ad_id         TEXT,                       -- пусто у расхода, внесённого руками
+  ad_name       TEXT, adset_id TEXT, adset_name TEXT,
+  campaign_id   TEXT, campaign_name TEXT,
+  spend         REAL NOT NULL DEFAULT 0,
+  impressions   INTEGER, clicks INTEGER,
+  currency      TEXT,
+  source        TEXT NOT NULL DEFAULT 'meta',   -- meta | manual
+  note          TEXT,
+  created_by    TEXT,
+  updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_spend_ad_day ON ad_spend(date, ad_id) WHERE ad_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_spend_date ON ad_spend(date);`);
+
 // мягкое удаление (ТЗ §4.3): заявка пропадает из работы, но остаётся в базе и журнале
 if (!cols.includes('deleted_at')) {
   db.exec('ALTER TABLE conversations ADD COLUMN deleted_at TEXT');
@@ -523,6 +563,30 @@ if (needStages) {
   if (before !== after) console.error('ВНИМАНИЕ: количество заявок до и после переноса не совпадает');
 }
 
+// Перенос атрибуции: старые заявки разбираем из сохранённой карточки объявления
+if (needAttr) {
+  const tally = {};
+  for (const c of db.prepare('SELECT * FROM conversations').all()) {
+    const a = classifySource(c);
+    db.prepare(`UPDATE conversations SET attr_status=?, attr_reason=?, platform=?, ad_id=?, ctwa_clid=?, first_touch_at=?,
+        source=CASE WHEN source LIKE 'Реклама%' THEN COALESCE(?, source) ELSE source END WHERE id=?`)
+      .run(a.status, a.reason, a.platform, a.ad_id, a.ctwa_clid, a.first_touch_at, a.label, c.id);
+    if (c.source_raw && c.source && !/^(Реклама|Метка )/.test(c.source)) {
+      db.prepare('UPDATE conversations SET campaign_name=? WHERE id=?').run(c.source, c.id);
+    }
+    tally[a.status] = (tally[a.status] || 0) + 1;
+  }
+  console.log('Атрибуция заявок:', JSON.stringify(tally));
+}
+// язык у старых заявок — один раз, по их переписке
+if (!cols.includes('lang')) {
+  const msgs = db.prepare("SELECT direction, body, media FROM messages WHERE conv_id=? ORDER BY id DESC LIMIT 12");
+  for (const c of db.prepare('SELECT id FROM conversations').all()) {
+    const l = dominantLang(msgs.all(c.id).reverse());
+    if (l) db.prepare('UPDATE conversations SET lang=? WHERE id=?').run(l, c.id);
+  }
+}
+
 // Номера из старого поля «Номера менеджеров» становятся менеджерами.
 // Один раз: если список уже заводили руками, ничего не трогаем.
 if (!db.prepare('SELECT count(*) n FROM managers').get().n) {
@@ -585,10 +649,34 @@ export const history = (convId, limit = 40) =>
 export function setSource(convId, src) {
   if (!src?.source) return;
   const cur = db.prepare('SELECT source FROM conversations WHERE id=?').get(convId);
-  if (cur?.source) return;
+  if (cur?.source) return;          // первое касание не перезаписываем (ТЗ §5.1)
   db.prepare('UPDATE conversations SET source=?, source_title=?, source_url=?, source_ref=?, source_raw=? WHERE id=?')
     .run(src.source, src.title || null, src.url || null, src.ref || null,
       src.raw ? JSON.stringify(src.raw) : null, convId);
+  const c = db.prepare('SELECT * FROM conversations WHERE id=?').get(convId);
+  const a = classifySource(c);
+  db.prepare('UPDATE conversations SET attr_status=?, attr_reason=?, platform=?, ad_id=?, ctwa_clid=?, first_touch_at=? WHERE id=?')
+    .run(a.status, a.reason, a.platform, a.ad_id, a.ctwa_clid, a.first_touch_at, convId);
+  // название из «Справочника кампаний» — кампания до тех пор, пока Meta не даст настоящее
+  if (src.raw && !/^(Реклама|Метка )/.test(src.source)) {
+    db.prepare('UPDATE conversations SET campaign_name=? WHERE id=? AND campaign_id IS NULL').run(src.source, convId);
+  }
+  fillAdNames(convId);
+}
+
+/** Названия кампании, группы, объявления и креатива из справочника Meta — когда он уже загружен. */
+export function fillAdNames(convId = null) {
+  db.prepare(`UPDATE conversations SET
+      ad_name = (SELECT name FROM meta_ads a WHERE a.ad_id = conversations.ad_id),
+      adset_id = (SELECT adset_id FROM meta_ads a WHERE a.ad_id = conversations.ad_id),
+      adset_name = (SELECT adset_name FROM meta_ads a WHERE a.ad_id = conversations.ad_id),
+      campaign_id = (SELECT campaign_id FROM meta_ads a WHERE a.ad_id = conversations.ad_id),
+      campaign_name = (SELECT campaign_name FROM meta_ads a WHERE a.ad_id = conversations.ad_id),
+      creative_id = (SELECT creative_id FROM meta_ads a WHERE a.ad_id = conversations.ad_id),
+      creative_name = (SELECT creative_name FROM meta_ads a WHERE a.ad_id = conversations.ad_id)
+    WHERE ad_id IS NOT NULL AND attr_status != 'manual'
+      AND EXISTS (SELECT 1 FROM meta_ads a WHERE a.ad_id = conversations.ad_id)
+      ${convId ? 'AND id = ?' : ''}`).run(...(convId ? [convId] : []));
 }
 
 /**

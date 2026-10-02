@@ -65,8 +65,9 @@ function refOf(msg) {
   try { utm = new URL(url).searchParams.get('utm_source') || ''; } catch {}
   // sourceApp: FB | IG; entryPointConversionSource: ctwa_ad, sources, id_link…
   const app = ad?.sourceApp || ctx?.entryPointConversionApp || '';
-  const APPS = { FB: 'Facebook', IG: 'Instagram', WhatsApp: 'WhatsApp' };
-  const label = APPS[app] || utm
+  // приходит и «FB», и «facebook» — без учёта регистра получалось «Реклама Реклама»
+  const APPS = { fb: 'Facebook', facebook: 'Facebook', ig: 'Instagram', instagram: 'Instagram', whatsapp: 'WhatsApp' };
+  const label = APPS[String(app).toLowerCase()] || utm
     || (entry.includes('ctwa') ? 'Реклама' : entry === 'id_link' ? 'Ссылка' : entry ? entry : 'Реклама');
 
   return {
