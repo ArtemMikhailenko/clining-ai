@@ -8,6 +8,7 @@
  */
 import { db, getSetting, audit, waitsMedia } from './db.js';
 import { actorName } from './context.js';
+import { debtOf } from './deals.js';
 import { recUrl } from './auth.js';
 import { getManager, listManagers, sqlTime, CALL_STATUS } from './calls.js';
 import { localDate, localClock, workHours, isHoliday } from './schedule.js';
@@ -45,6 +46,9 @@ export function nextAction(c) {
       who: getManager(c.next_action_mgr || c.manager_id)?.name || '' };
   }
   if (c.followup_at) return { kind: 'bot', what: c.followup_note || 'бот напишет клиенту', at: c.followup_at, who: 'бот' };
+  // работа сделана, деньги не все — действие очевидно (этап 5)
+  const debt = debtOf(c);
+  if (debt > 0) return { kind: 'pay', what: `получить оплату ${debt.toLocaleString('ru-RU')} ₪`, at: null, who: getManager(c.manager_id)?.name || '' };
   const botLeads = c.ai_enabled && c.status === 'ai' && !c.needs_human && ['new', 'clarify'].includes(c.stage || 'new');
   if (botLeads) return { kind: 'bot', what: 'бот ведёт диалог', at: null, who: 'бот' };
   if (c.stage === 'agreed' && c.job_date && c.job_date >= localDate()) {
@@ -73,7 +77,10 @@ export function warnings(c, k = {}) {
   if (active && !nextAction(c)) add('no_next', 'red', 'нет следующего действия');
   if (c.stage === 'agreed' && c.job_date && c.job_date < today) add('job_passed', 'red', 'дата работ прошла — отметьте выполнение');
   if (c.stage === 'agreed' && !c.job_date) add('no_date', 'amber', 'согласовано без даты работ');
-  if (c.stage === 'done' && !(c.paid_sum > 0)) add('unpaid', 'amber', 'выполнено, оплаты нет');
+  // §7: работа выполнена, оплаты нет — задолженность; цены нет — непонятно, сколько ждать
+  const debt = debtOf(c);
+  if (debt > 0) add('debt', 'red', `задолженность ${debt.toLocaleString('ru-RU')} ₪`);
+  else if (c.stage === 'done' && !(c.deal_sum > 0) && !(c.paid_sum > 0)) add('unpaid', 'amber', 'выполнено: внесите цену и оплату');
   if (c.stage === 'offer' && !calls) add('offer_nocall', 'amber', 'предложение без звонка');
   if (c.stage === 'offer' && c.last_in_at !== undefined) {
     const since = Math.min(hoursSince(c.last_in_at), hoursSince(c.stage_at || c.last_at));

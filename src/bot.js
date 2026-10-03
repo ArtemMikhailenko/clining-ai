@@ -1,4 +1,4 @@
-import { db, addMessage, getOrCreateConversation, getConversation, history, getSetting, messageExists, setSource, applyStage } from './db.js';
+import { db, addMessage, getOrCreateConversation, getConversation, history, getSetting, messageExists, setSource, applyStage, latestDeal } from './db.js';
 import { generateReply } from './ai.js';
 import { channel, adapterFor } from './channels/index.js';
 import { detectLang } from './lang.js';
@@ -180,7 +180,7 @@ export async function handleIncoming(msg, ch = channel) {
     else await processIncoming(msg, ch);
   } catch (e) {
     console.error('обработка сообщения:', e.stack || e.message);
-    const conv = db.prepare('SELECT * FROM conversations WHERE channel=? AND phone=?').get(ch.name, msg.phone);
+    const conv = latestDeal(ch.name, msg.phone);
     if (!conv) return;
     flagHuman(conv.id, 'сбой при обработке сообщения — ответьте сами');
     addMessage(conv.id, { direction: 'out', author: 'system', body: 'Сбой при обработке: ' + e.message, error: '1' });
@@ -201,7 +201,8 @@ export async function handleIncoming(msg, ch = channel) {
 async function processOutgoing({ phone, text, wa_id, chat_id = null, media = [] }, ch = channel) {
   if (messageExists(wa_id)) return;        // наш же ответ после перезапуска
   if (blocked(phone)) return;
-  const conv = getOrCreateConversation(ch.name, phone, null, chat_id);
+  // ответ менеджера — продолжение последней сделки, новую он не открывает
+  const conv = latestDeal(ch.name, phone) || getOrCreateConversation(ch.name, phone, null, chat_id);
   if (!text && !media.length) return;
 
   clearTimeout(timers.get(conv.id));       // бот собирался ответить — уже не нужно
@@ -222,7 +223,8 @@ async function processIncoming({ phone, name, text, wa_id, chat_id = null, media
     for (const it of media) for (const f of [it.file, ...(it.frames ?? [])]) fs.rm(mediaPath(f), { force: true }, () => {});
     return;
   }
-  const conv = getOrCreateConversation(ch.name, phone, name, chat_id);
+  // пришёл с новой рекламы после закрытой сделки — это новая сделка со своим источником
+  const conv = getOrCreateConversation(ch.name, phone, name, chat_id, { fromAd: Boolean(ref) });
   // откуда клиент: карточка объявления от WhatsApp или метка #… в тексте ссылки.
   // Если в справочнике кампаний нашёлся ключ — пишем название кампании, а не «Реклама Facebook»
   const src = ref || tagSource(text);
@@ -251,12 +253,14 @@ async function processIncoming({ phone, name, text, wa_id, chat_id = null, media
   const lang = dominantLang(history(conv.id, 12));
   if (lang) db.prepare('UPDATE conversations SET lang=? WHERE id=?').run(lang, conv.id);
 
-  // Клиент вернулся после проигрыша или оплаты — это снова живая заявка, а не
-  // строчка в архиве. Сотрудников и «обычные уборки» не поднимаем: бот им уже
-  // всё ответил. Отдельной сделкой повторный заказ станет на этапе 5.
-  if (conv.status === 'closed' && ['lost', 'paid'].includes(conv.close_reason)) {
+  // Написал вскоре после закрытия (давнее закрытие уже стало новой сделкой выше).
+  // Проигранную поднимаем — клиент передумал. Оплаченную не трогаем: это «спасибо»
+  // или вопрос по прошлой уборке, итог сделки менять нельзя — только посмотреть.
+  if (conv.status === 'closed' && conv.close_reason === 'lost') {
     applyStage(conv.id, 'clarify', { actor: 'система', why: 'клиент написал снова после закрытия' });
     db.prepare('UPDATE conversations SET review=? WHERE id=?').run('клиент вернулся после закрытия', conv.id);
+  } else if (conv.status === 'closed' && conv.close_reason === 'paid') {
+    db.prepare('UPDATE conversations SET review=? WHERE id=?').run('клиент написал после оплаты — посмотрите', conv.id);
   }
 
   // «не пишите мне» — выключаем все напоминания по этому диалогу навсегда

@@ -1274,7 +1274,8 @@ button,a,.lrow,.card,.frow{-webkit-tap-highlight-color:transparent;touch-action:
   border-radius:var(--r-md);padding:5px 8px;max-width:220px}
 .rep-f.on select{border-color:var(--accent);box-shadow:var(--ring)}
 .rep-kpis{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:10px}
-.rep-kpis.money{grid-template-columns:repeat(5,minmax(0,1fr))}
+.rep-kpis.money{grid-template-columns:repeat(6,minmax(0,1fr))}
+.rep-k .rep-n.bad{color:var(--danger)}
 .rep-k{background:var(--surface);border:var(--hair) solid var(--border);border-radius:var(--r-lg);padding:12px 14px;display:flex;flex-direction:column;gap:4px;min-width:0}
 .rep-k span{font-size:12px;color:var(--muted)}
 .rep-k b{font-family:var(--display);font-size:22px;font-weight:560;font-variant-numeric:tabular-nums}
@@ -1310,6 +1311,34 @@ button,a,.lrow,.card,.frow{-webkit-tap-highlight-color:transparent;touch-action:
 .spend-add input[type=text]{flex:1 1 180px;min-width:0}
 @media (max-width:1200px){.rep-kpis{grid-template-columns:repeat(4,minmax(0,1fr))}.rep-kpis.money{grid-template-columns:repeat(3,minmax(0,1fr))}}
 @media (max-width:720px){.rep{padding:12px 16px 24px}.rep-kpis,.rep-kpis.money{grid-template-columns:repeat(2,minmax(0,1fr))}}
+/* этап 5: сделки клиента, работы, оплаты */
+.dealsep{margin:14px auto 6px;font-size:11px;color:var(--muted);text-align:center;display:flex;align-items:center;gap:10px}
+.dealsep::before,.dealsep::after{content:"";flex:1;height:var(--hair);background:var(--border)}
+.dealsep.cur{color:var(--accent);font-weight:540}
+.works{display:flex;flex-direction:column;gap:8px}
+.work{padding:8px 10px;border-radius:var(--r-md);border:var(--hair) solid var(--border);background:var(--surface-2)}
+.work.moved,.work.cancelled{opacity:.65}
+.work.done{border-color:color-mix(in srgb,var(--green) 30%,transparent);background:var(--green-soft)}
+.work-h{display:flex;justify-content:space-between;align-items:baseline;gap:8px;font-size:13px}
+.wst{font-size:11.5px;color:var(--muted)}
+.work.done .wst{color:var(--green)}
+.work-r{font-size:11.5px;color:var(--muted);margin-top:2px}
+.work-a{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.calc .pay small{display:block;color:var(--muted);font-size:11px}
+.calc .tot.debt span{color:var(--danger)}
+.calc .gone span{color:var(--muted);font-size:11.5px}
+.pay-f{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:8px}
+.pay-f .unit{flex:1 1 110px}
+.pay-f input[type=number],.cf-row input[type=number]{font:inherit;font-size:13px;color:var(--text);background:var(--surface);
+  border:var(--hair) solid var(--border);border-radius:var(--r-sm,6px);padding:5px 8px;width:100%;min-width:0;box-sizing:border-box}
+.pay-f select,.pay-f input[type=date]{font:inherit;font-size:13px;color:var(--text);background:var(--surface);
+  border:var(--hair) solid var(--border);border-radius:var(--r-sm,6px);padding:5px 7px;min-width:0}
+.deals{display:flex;flex-direction:column;gap:6px}
+.deal{display:grid;grid-template-columns:auto 1fr auto;gap:2px 8px;padding:7px 9px;border-radius:var(--r-md);cursor:pointer;
+  border:var(--hair) solid var(--border);font-size:12.5px;color:var(--text-2)}
+.deal:hover{background:var(--side-hover)}
+.deal b{color:var(--text)}
+.deal small{grid-column:1/-1;color:var(--muted);font-size:11px}
 </style>
 </head>
 <body>

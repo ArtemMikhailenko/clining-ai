@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS conversations (
   summary        TEXT,
   created_at     TEXT NOT NULL DEFAULT (datetime('now')),
   last_at        TEXT NOT NULL DEFAULT (datetime('now')),
-  UNIQUE(channel, phone)
+  phone_raw      TEXT
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -207,6 +207,83 @@ if (!cols.includes('next_action')) {
   if (moved) console.log(`Следующее действие: перенесено ${moved} напоминаний менеджеру`);
 }
 if (!cols.includes('stage_at')) db.exec('ALTER TABLE conversations ADD COLUMN stage_at TEXT');   // когда сменился этап
+/* ─────────── Этап 5: клиент отдельно от сделки (ТЗ §10) ───────────
+   Раньше один телефон = одна заявка навсегда: повторный заказ через полгода
+   поднимал старую карточку с чужим источником рекламы и старыми суммами.
+   Теперь заявка (conversations) — это сделка, а человек — контакт. */
+const convSql = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='conversations'").get().sql;
+if (/UNIQUE\s*\(\s*channel\s*,\s*phone\s*\)/i.test(convSql)) {
+  const before = db.prepare('SELECT count(*) n FROM conversations').get().n;
+  const newSql = convSql.replace(/,\s*UNIQUE\s*\(\s*channel\s*,\s*phone\s*\)/i, '')
+    .replace(/CREATE TABLE\s+("?)conversations\1/i, 'CREATE TABLE conversations_new');
+  db.exec('PRAGMA foreign_keys = OFF');
+  db.exec('BEGIN');
+  try {
+    db.exec(newSql);
+    const names = db.prepare('PRAGMA table_info(conversations)').all().map((c) => c.name).join(',');
+    db.exec(`INSERT INTO conversations_new(${names}) SELECT ${names} FROM conversations`);
+    db.exec('DROP TABLE conversations');
+    db.exec('ALTER TABLE conversations_new RENAME TO conversations');
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
+  db.exec('PRAGMA foreign_keys = ON');
+  const after = db.prepare('SELECT count(*) n FROM conversations').get().n;
+  console.log(`Сделки: снято ограничение «один телефон — одна заявка», заявок ${before} → ${after}`);
+}
+db.exec('CREATE INDEX IF NOT EXISTS idx_conv_phone ON conversations(channel, phone, id)');
+
+/** Телефон в международном формате (ТЗ §10.1): «050-123-4567» → 972501234567. */
+export function normalizePhone(v) {
+  let d = String(v || '').replace(/\D/g, '');
+  if (d.startsWith('00')) d = d.slice(2);
+  if (/^0\d{8,9}$/.test(d)) d = '972' + d.slice(1);       // израильский номер без кода страны
+  return d;
+}
+
+db.exec(`CREATE TABLE IF NOT EXISTS contacts (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  phone      TEXT NOT NULL UNIQUE,       -- нормализованный, международный
+  phone_raw  TEXT,                       -- как ввели или как пришло
+  name       TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+-- Оплаты отдельно (ТЗ §10): несколько платежей на сделку, способ и дата у каждого
+CREATE TABLE IF NOT EXISTS payments (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  conv_id    INTEGER NOT NULL,
+  amount     INTEGER NOT NULL,
+  method     TEXT,                       -- cash | transfer | bit | card | check | other
+  paid_at    TEXT NOT NULL,              -- ГГГГ-ММ-ДД
+  note       TEXT,
+  created_by TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  deleted_at TEXT, deleted_by TEXT, delete_reason TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_payments_conv ON payments(conv_id);`);
+
+const cols5 = db.prepare('PRAGMA table_info(conversations)').all().map((c) => c.name);
+if (!cols5.includes('contact_id')) {
+  db.exec('ALTER TABLE conversations ADD COLUMN contact_id INTEGER');
+  db.exec('ALTER TABLE conversations ADD COLUMN prev_deal_id INTEGER');   // повторная сделка — откуда продолжение
+}
+if (!cols5.includes('phone_raw')) db.exec('ALTER TABLE conversations ADD COLUMN phone_raw TEXT');
+db.exec('CREATE INDEX IF NOT EXISTS idx_conv_contact ON conversations(contact_id, id)');
+
+// Работы (ТЗ §10): дата, выполнение или перенос с причиной. Уборки, заведённые
+// руками, жили в jobs и раньше — теперь там же и работы по сделкам
+const jobCols = db.prepare('PRAGMA table_info(jobs)').all().map((c) => c.name);
+if (!jobCols.includes('conv_id')) {
+  db.exec('ALTER TABLE jobs ADD COLUMN conv_id INTEGER');
+  db.exec("ALTER TABLE jobs ADD COLUMN status TEXT NOT NULL DEFAULT 'planned'");   // planned | done | moved | cancelled
+  db.exec('ALTER TABLE jobs ADD COLUMN status_reason TEXT');
+  db.exec('ALTER TABLE jobs ADD COLUMN done_at TEXT');
+  db.exec('ALTER TABLE jobs ADD COLUMN created_by TEXT');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_jobs_conv ON jobs(conv_id)');
+}
+
 // Атрибуция рекламы (ТЗ §5): цепочка до объявления и статус, насколько ей можно верить.
 // source_raw — то, что прислала Meta, — не меняется никогда; разобранное лежит рядом
 const needAttr = !cols.includes('attr_status');
@@ -587,6 +664,34 @@ if (!cols.includes('lang')) {
   }
 }
 
+// Перенос этапа 5: у каждой сделки — контакт, у оплаты — строка, у даты записи — работа
+if (!cols5.includes('contact_id')) {
+  const t = { contacts: 0, payments: 0, jobs: 0 };
+  for (const c of db.prepare('SELECT * FROM conversations ORDER BY id').all()) {
+    const phone = normalizePhone(c.phone) || c.phone;
+    let ct = db.prepare('SELECT id FROM contacts WHERE phone=?').get(phone);
+    if (!ct) {
+      ct = { id: Number(db.prepare('INSERT INTO contacts(phone, phone_raw, name, created_at) VALUES(?,?,?,?)')
+        .run(phone, c.phone, c.name, c.created_at).lastInsertRowid) };
+      t.contacts++;
+    }
+    db.prepare('UPDATE conversations SET contact_id=?, phone_raw=COALESCE(phone_raw, phone) WHERE id=?').run(ct.id, c.id);
+    if (c.paid_sum > 0) {
+      db.prepare(`INSERT INTO payments(conv_id, amount, method, paid_at, note, created_by)
+        VALUES(?,?,NULL,?, 'перенесено из поля «оплачено»', 'перенос')`)
+        .run(c.id, c.paid_sum, c.paid_at || String(c.last_at).slice(0, 10));
+      t.payments++;
+    }
+    if (/^\d{4}-\d{2}-\d{2}$/.test(c.job_date || '')) {
+      db.prepare(`INSERT INTO jobs(date, time, name, phone, conv_id, status, created_by)
+        VALUES(?,?,?,?,?,?, 'перенос')`)
+        .run(c.job_date, c.job_time || null, c.name, c.phone, c.id, c.stage === 'done' || c.close_reason === 'paid' ? 'done' : 'planned');
+      t.jobs++;
+    }
+  }
+  console.log('Контакты и сделки:', JSON.stringify(t));
+}
+
 // Номера из старого поля «Номера менеджеров» становятся менеджерами.
 // Один раз: если список уже заводили руками, ничего не трогаем.
 if (!db.prepare('SELECT count(*) n FROM managers').get().n) {
@@ -603,23 +708,61 @@ export const getSetting = (k) =>
 export const setSetting = (k, v) =>
   db.prepare('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(k, String(v));
 
-export function getOrCreateConversation(channel, phone, name, chatId = null) {
-  const found = db.prepare('SELECT * FROM conversations WHERE channel=? AND phone=?').get(channel, phone);
-  if (found) {
-    // удалённая заявка, а клиент написал снова: живой клиент важнее пометки
-    if (found.deleted_at) {
-      db.prepare('UPDATE conversations SET deleted_at=NULL, deleted_by=NULL, delete_reason=NULL WHERE id=?').run(found.id);
-      audit('lead', found.id, 'deleted', found.deleted_at, null, 'система', 'клиент написал снова');
-    }
-    if (name && !found.name) db.prepare('UPDATE conversations SET name=? WHERE id=?').run(name, found.id);
-    // chat_id мог смениться (@lid ↔ @c.us) — всегда держим последний рабочий
-    if (chatId && chatId !== found.chat_id) db.prepare('UPDATE conversations SET chat_id=? WHERE id=?').run(chatId, found.id);
-    return db.prepare('SELECT * FROM conversations WHERE id=?').get(found.id);
+/** Последняя сделка по телефону — для ответа менеджера с телефона и служебных случаев. */
+export const latestDeal = (channel, phone) =>
+  db.prepare('SELECT * FROM conversations WHERE channel=? AND phone=? ORDER BY id DESC LIMIT 1').get(channel, phone);
+
+export function contactFor(phone, name = null) {
+  const norm = normalizePhone(phone) || String(phone);
+  let ct = db.prepare('SELECT * FROM contacts WHERE phone=?').get(norm);
+  if (!ct) {
+    const id = Number(db.prepare('INSERT INTO contacts(phone, phone_raw, name) VALUES(?,?,?)').run(norm, String(phone), name).lastInsertRowid);
+    ct = db.prepare('SELECT * FROM contacts WHERE id=?').get(id);
+  } else if (name && !ct.name) db.prepare('UPDATE contacts SET name=? WHERE id=?').run(name, ct.id);
+  return ct;
+}
+
+/** Через сколько дней после закрытия сообщение клиента — уже новый заказ, а не «спасибо». */
+const repeatDays = () => Number(getSetting('repeat_after_days')) || 3;
+
+/**
+ * Куда положить входящее сообщение (ТЗ §5.1, §10):
+ *  — есть открытая сделка — в неё;
+ *  — сделка закрыта давно или клиент пришёл с новой рекламы — новая сделка,
+ *    со своей атрибуцией: первое касание контакта не подменяет источник нового заказа;
+ *  — закрыта только что — в неё же (это «спасибо» или вопрос по прошлой уборке).
+ */
+export function getOrCreateConversation(channel, phone, name, chatId = null, { fromAd = false } = {}) {
+  const found = latestDeal(channel, phone);
+  const ct = contactFor(phone, name);
+  const create = (prev = null) => {
+    const { lastInsertRowid } = db
+      .prepare("INSERT INTO conversations(channel, phone, phone_raw, name, chat_id, stage, contact_id, prev_deal_id) VALUES(?,?,?,?,?,'new',?,?)")
+      .run(channel, phone, phone, name ?? prev?.name ?? null, chatId ?? prev?.chat_id ?? null, ct.id, prev?.id ?? null);
+    const id = Number(lastInsertRowid);
+    // источник новой сделки — своё касание: без рекламы это органика, реклама перепишет ниже (setSource)
+    db.prepare("UPDATE conversations SET attr_status='organic', platform='organic', attr_reason=? WHERE id=?")
+      .run(prev ? 'повторное обращение' : null, id);
+    if (prev) audit('lead', id, 'deal', `сделка #${prev.id}`, `новая сделка #${id}`, 'система', fromAd ? 'клиент пришёл с новой рекламы' : 'повторное обращение');
+    return db.prepare('SELECT * FROM conversations WHERE id=?').get(id);
+  };
+  if (!found) return create();
+
+  if (found.status === 'closed' && !found.deleted_at && !['unq_regular', 'unq_staff'].includes(found.close_reason)) {
+    const closedAt = found.stage_at || found.last_at;
+    const days = (Date.now() - new Date(String(closedAt).replace(' ', 'T') + 'Z')) / 864e5;
+    if (fromAd || days >= repeatDays()) return create(found);
   }
-  const { lastInsertRowid } = db
-    .prepare("INSERT INTO conversations(channel, phone, name, chat_id, stage) VALUES(?,?,?,?,'new')")
-    .run(channel, phone, name ?? null, chatId);
-  return db.prepare('SELECT * FROM conversations WHERE id=?').get(lastInsertRowid);
+  // удалённая заявка, а клиент написал снова: живой клиент важнее пометки
+  if (found.deleted_at) {
+    db.prepare('UPDATE conversations SET deleted_at=NULL, deleted_by=NULL, delete_reason=NULL WHERE id=?').run(found.id);
+    audit('lead', found.id, 'deleted', found.deleted_at, null, 'система', 'клиент написал снова');
+  }
+  if (name && !found.name) db.prepare('UPDATE conversations SET name=? WHERE id=?').run(name, found.id);
+  // chat_id мог смениться (@lid ↔ @c.us) — всегда держим последний рабочий
+  if (chatId && chatId !== found.chat_id) db.prepare('UPDATE conversations SET chat_id=? WHERE id=?').run(chatId, found.id);
+  if (!found.contact_id) db.prepare('UPDATE conversations SET contact_id=? WHERE id=?').run(ct.id, found.id);
+  return db.prepare('SELECT * FROM conversations WHERE id=?').get(found.id);
 }
 
 /** Провайдеры ретраят вебхуки — один и тот же wa_id не обрабатываем дважды. */

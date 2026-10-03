@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import { spawn } from 'node:child_process';
 import { db, listConversations, getConversation, history, getSetting, setSetting, addMessage, resetData, applyStage, audit,
-  waitsMedia, logAccess, assertHumanWrite } from './db.js';
+  waitsMedia, logAccess, assertHumanWrite, latestDeal, normalizePhone, contactFor } from './db.js';
 import { stageIndex, amountOf, STAGE_TITLE, CLOSE_TITLE } from './stages.js';
 import { handleIncoming, sendAsHuman, suggestReply, subscribe, emit } from './bot.js';
 import * as botState from './bot.js';
@@ -21,6 +21,8 @@ import { ADMIN, authEnabled, sessionUser, basicUser, readCookie, setCookie, logi
   setPassword, dropSessions, recUrl, recValid } from './auth.js';
 import { listFailures, retryNow, startRetries } from './integrations.js';
 import { buildReport, leadList } from './report.js';
+import { listPayments, addPayment, deletePayment, listWorks, syncWorkDate, workDone, workMove, workCancel,
+  contactDeals, newDealFrom, contactMessages, debtOf, PAY_METHODS, WORK_STATUS } from './deals.js';
 import { syncMeta, metaStatus, startMeta, accountId as metaAccount } from './meta.js';
 import { ATTR_TITLE, PLATFORM_TITLE } from './attribution.js';
 import { localDate } from './schedule.js';
@@ -75,7 +77,7 @@ const OWNER_ONLY = [
   ['GET', /^\/api\/conversations\/deleted$/], ['*', /^\/api\/calls\/\d+\/recording/],
   ['*', /^\/api\/report/], ['*', /^\/api\/meta\//], ['*', /^\/api\/spend/]
 ];
-const CONV_WRITE = /^\/api\/conversations\/(\d+)\/(lead|note|send|mode|stage|flag|reviewed|next|calls|status)$/;
+const CONV_WRITE = /^\/api\/conversations\/(\d+)\/(lead|note|send|mode|stage|flag|reviewed|next|calls|status|payments|payments\/\d+\/delete|works\/\d+\/\w+|new-deal)$/;
 
 app.use((req, res, next) => {
   const u = req.user;
@@ -93,7 +95,7 @@ app.use((req, res, next) => {
       return res.status(403).json({ error: `Заявку ведёт ${who}. Чтобы работать с ней, нажмите «Взять себе»`, take: true });
     }
     // оплаченная сделка — итог для отчётов: исправляет её только владелец
-    if (conv?.close_reason === 'paid' && ['lead', 'stage'].includes(w[2])) {
+    if (conv?.close_reason === 'paid' && (['lead', 'stage', 'payments'].includes(w[2]) || /^(payments|works)\//.test(w[2]))) {
       return res.status(403).json({ error: 'Оплаченную сделку исправляет владелец' });
     }
   }
@@ -195,6 +197,8 @@ app.get('/api/state', (req, res) => {
     managers: listManagers(),
     me: req.user,
     me_auth: authEnabled(),
+    pay_methods: PAY_METHODS, work_status: WORK_STATUS,
+    repeat_after_days: Number(getSetting('repeat_after_days')) || 3,
     meta_ad_account: getSetting('meta_ad_account') || '',
     meta_account: metaAccount(),
     meta_spend_since: getSetting('meta_spend_since') || '',
@@ -244,6 +248,7 @@ app.post('/api/state', (req, res) => {
   if ('source_map' in req.body) setSetting('source_map', String(req.body.source_map));
   if ('media_required' in req.body) setSetting('media_required', String(req.body.media_required));
   if ('evening_report' in req.body) setSetting('evening_report', req.body.evening_report ? '1' : '0');
+  if ('repeat_after_days' in req.body) setSetting('repeat_after_days', String(Math.min(90, Math.max(1, Number(req.body.repeat_after_days) || 3))));
   if ('amounts_with_vat' in req.body) setSetting('amounts_with_vat', req.body.amounts_with_vat ? '1' : '0');
   if ('vat_rate' in req.body) setSetting('vat_rate', String(Math.min(30, Math.max(0, Number(req.body.vat_rate) || 0))));
   if ('meta_ad_account' in req.body) setSetting('meta_ad_account', String(req.body.meta_ad_account || '').trim().replace(/^act_/, ''));
@@ -407,7 +412,8 @@ app.get('/api/conversations/:id', (req, res) => {
   conv.last_in_at = db.prepare("SELECT max(created_at) t FROM messages WHERE conv_id=? AND direction='in'").get(conv.id).t;
   conv.wait_media = waitsMedia(conv);
   annotate([conv]);
-  res.json({ ...conv, messages: history(conv.id, 200), quote: quote(JSON.parse(conv.lead || '{}')) });
+  res.json({ ...conv, messages: contactMessages(conv), deals: contactDeals(conv), payments: listPayments(conv.id),
+    works: listWorks(conv.id), debt: debtOf(conv), quote: quote(JSON.parse(conv.lead || '{}')) });
 });
 
 /** Черновик ответа для менеджера: показать, но не отправлять. */
@@ -465,13 +471,23 @@ app.post('/api/conversations/:id/lead', (req, res) => {
       .run(jd || null, jt || null, jd || null, id);
     audit('lead', id, 'job_date', [conv.job_date, conv.job_time].filter(Boolean).join(' ') || null,
       [jd, jt].filter(Boolean).join(' ') || null, 'менеджер');
+    syncWorkDate(id, jd, jt);          // работа — отдельная строка с историей переносов
     if (jd && lead.stage !== 'отказ') lead.stage = 'дата согласована';
     if (!jd && lead.stage === 'дата согласована') lead.stage = 'готов к заказу';
     stageMoves.push(jd ? ['agreed', 'менеджер поставил дату записи'] : null);
   }
   // Деньги проставляет человек: «согласовано» — то, о чём договорились,
   // «оплачено» — то, что реально получили. Оценка бота остаётся в карточке отдельно.
-  for (const k of ['deal_sum', 'paid_sum']) {
+  // оплата больше не поле, а платежи (этап 5): старая форма прислала «оплачено» — вносим разницу платежом
+  if ('paid_sum' in req.body) {
+    const want = Number(String(req.body.paid_sum ?? '').replace(/[^\d]/g, '')) || 0;
+    const have = conv.paid_sum || 0;
+    if (want < have) return res.status(400).json({ error: 'Уменьшить оплату можно, только удалив платёж в блоке «Оплаты»' });
+    if (want > have) addPayment(id, { amount: want - have, method: 'other', paid_at: req.body.paid_at, note: 'внесено через форму заявки' });
+    delete req.body.paid_sum;
+    delete req.body.paid_at;
+  }
+  for (const k of ['deal_sum']) {
     if (!(k in req.body)) continue;
     const n = Number(String(req.body[k] ?? '').replace(/[^\d]/g, ''));
     db.prepare(`UPDATE conversations SET ${k}=? WHERE id=?`).run(n > 0 ? n : null, id);
@@ -479,7 +495,6 @@ app.post('/api/conversations/:id/lead', (req, res) => {
     // окончательная цена от менеджера — это и есть «предложение отправлено»;
     // оплата закрывает сделку как оплаченную
     if (k === 'deal_sum' && n > 0) stageMoves.push(['offer', 'менеджер назвал окончательную цену']);
-    if (k === 'paid_sum' && n > 0) stageMoves.push(['closed:paid', 'внесена оплата']);
   }
   if ('paid_at' in req.body) {
     const d = String(req.body.paid_at ?? '').trim();
@@ -604,7 +619,7 @@ app.get('/api/schedule', (req, res) => {
     .map((r) => ({ ...r, kind: 'conv' }));
 
   // уборки, заведённые руками — их в переписке нет
-  const manual = db.prepare('SELECT * FROM jobs').all().map((j) => ({
+  const manual = db.prepare('SELECT * FROM jobs WHERE conv_id IS NULL').all().map((j) => ({
     id: j.id, kind: 'manual', phone: j.phone || '', name: j.name || '',
     date: j.date, time: j.time || '', service: j.service || '', area: j.area || '',
     district: j.district || '', price: j.price || '', note: j.note || '',
@@ -766,6 +781,26 @@ app.post('/api/calls/:id/recording/restore', (req, res) => {
   try { restoreRecording(Number(req.params.id)); res.json({ ok: true }); }
   catch (e) { res.status(400).json({ error: e.message }); }
 });
+
+/* ─────────── Оплаты, работы, сделки клиента (этап 5) ─────────── */
+const dealAction = (fn) => (req, res) => {
+  const id = Number(req.params.id);
+  try { const out = fn(id, req); emit('conversations', null); res.json(out ?? getConversation(id)); }
+  catch (e) { res.status(e.message.includes('может менять только') ? 403 : 400).json({ error: e.message }); }
+};
+app.post('/api/conversations/:id/payments', dealAction((id, req) => { addPayment(id, req.body || {}); return null; }));
+app.post('/api/conversations/:id/payments/:pid/delete', dealAction((id, req) => {
+  deletePayment(id, Number(req.params.pid), req.body?.reason); return null;
+}));
+app.post('/api/conversations/:id/works/:wid/:act', dealAction((id, req) => {
+  const wid = Number(req.params.wid);
+  if (req.params.act === 'done') workDone(id, wid);
+  else if (req.params.act === 'move') workMove(id, wid, req.body || {});
+  else if (req.params.act === 'cancel') workCancel(id, wid, req.body?.reason);
+  else throw new Error('Неизвестное действие');
+  return null;
+}));
+app.post('/api/conversations/:id/new-deal', dealAction((id) => ({ id: newDealFrom(id) })));
 
 /* ─────────── Реклама и отчёт (этап 4, ТЗ §5, §9) ─────────── */
 app.get('/api/report', (req, res) => res.json(buildReport(req.query)));
@@ -970,7 +1005,7 @@ app.post('/api/sim/incoming', async (req, res) => {
   await handleIncoming({ phone: String(from), name: name || null, text: String(text || ''), media,
     wa_id: 'sim-' + Date.now(), ref: req.body.ref || null,
     fromMe: req.body.fromMe === true }, channels.mock);
-  const conv = db.prepare('SELECT * FROM conversations WHERE channel=? AND phone=?').get('mock', String(from));
+  const conv = latestDeal('mock', String(from));
   res.json({ ok: true, conv_id: conv?.id, messages: conv ? history(conv.id, 200) : [] });
 });
 

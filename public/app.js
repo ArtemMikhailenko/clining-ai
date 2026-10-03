@@ -193,7 +193,7 @@ function chipFor(c) {
   const red = (c.warn || []).find((w) => w.level === 'red' && w.code !== 'late');
   if (red) chips.push(`<span class="chip late">${esc(red.text)}</span>`);
   if (c.wait_media) chips.push('<span class="chip wait">ждём фото/видео</span>');
-  if (c.stage === 'done' && !c.paid_sum) chips.push('<span class="chip wait">ожидается оплата</span>');
+  if (c.stage === 'done' && !(c.deal_sum > 0 && c.paid_sum >= c.deal_sum)) chips.push('<span class="chip wait">ожидается оплата</span>');
   if (c.review) chips.push(`<span class="chip review" title="${esc(c.review)}">проверить</span>`);
   return chips.join('');
 }
@@ -933,8 +933,14 @@ function chatHtml(c) {
       </div></div></div>`;
 }
 function threadHtml(c) {
-  let html = '', lastDay = '', prev = null;
+  let html = '', lastDay = '', prev = null, lastConv = null;
+  const multi = new Set(c.messages.map((m) => m.conv_id)).size > 1;
   for (const m of c.messages) {
+    // у клиента несколько сделок: переписка общая, но видно, где началась каждая
+    if (multi && m.conv_id !== lastConv) {
+      html += `<div class="dealsep ${m.conv_id === c.id ? 'cur' : ''}">${m.conv_id === c.id ? 'эта сделка' : 'сделка #' + m.conv_id}</div>`;
+      lastConv = m.conv_id; lastDay = ''; prev = null;
+    }
     const d = dayLabel(m.created_at);
     if (d !== lastDay) { html += `<div class="daysep">${d}</div>`; lastDay = d; prev = null; }
     if (m.author === 'system') { html += `<div class="sys">${esc(m.body)}</div>`; prev = null; continue; }
@@ -1075,8 +1081,6 @@ const EDITABLE = [
   ['condition', 'Загрязнение', 'select', ['', 'лёгкое', 'среднее', 'сильное', 'после ремонта']],
   ['price_quote', 'Оценка бота, ₪', 'text'],
   ['deal_sum', 'Согласовано, ₪', 'text'],
-  ['paid_sum', 'Оплачено, ₪', 'text'],
-  ['paid_at', 'Дата оплаты', 'date'],
   ['stage', 'Стадия', 'select', ['', 'новый', 'уточняем', 'ждём видео', 'заявка готова', 'назвали цену', 'готов к заказу', 'дата согласована', 'отказ']]
 ];
 
@@ -1178,6 +1182,7 @@ function bindNext(root, convId) {
 
 /* Единая история (ТЗ §4.2): что поменялось, кто и когда */
 const FIELD_T = { stage: 'Этап', deal_sum: 'Окончательная цена', paid_sum: 'Оплата', paid_at: 'Дата оплаты',
+  payment: 'Платёж', work: 'Работа', deal: 'Сделка', attr_status: 'Атрибуция',
   job_date: 'Дата работ', manager_id: 'Ответственный', call_due_at: 'Срок звонка', next_action: 'Следующее действие',
   needs_human: 'Нужен менеджер', review: 'Пометка «проверить»', call: 'Звонок', source: 'Источник', deleted: 'Удаление',
   recording: 'Запись разговора' };
@@ -1220,6 +1225,114 @@ function timelineHtml(items) {
 function warnHtml(c) {
   const list = (c.warn || []).filter((w) => w.code !== 'late');
   return list.length ? `<div class="warns">${list.map((w) => `<span class="warn-i ${w.level}">${esc(w.text)}</span>`).join('')}</div>` : '';
+}
+
+/* ───── этап 5: работы, оплаты, сделки клиента ───── */
+// дата работы или оплаты — день без времени; время создания — в UTC, показываем по местному
+const fmtD = (iso) => (!iso ? '' : (String(iso).length > 10 ? dt(iso) : new Date(String(iso) + 'T12:00:00Z'))
+  .toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' }));
+
+/** Работы (выезды): дата и итог. Перенос и отмена — только с причиной. */
+function worksHtml(c) {
+  const ws = c.works || [];
+  if (!ws.length) return '';
+  const st = state.work_status || {};
+  return `<div class="sect"><h4>Работы</h4><div class="works">${ws.map((w) => `<div class="work ${w.status}">
+      <div class="work-h"><b>${fmtD(w.date)}${w.time ? ' · ' + esc(w.time) : ''}</b><span class="wst">${esc(st[w.status] || w.status)}</span></div>
+      ${w.status_reason ? `<div class="work-r">${esc(w.status_reason)}</div>` : ''}
+      ${w.status === 'planned' && c.stage !== 'closed' ? `<div class="work-a">
+        <button class="btn sm primary" data-work="done" data-wid="${w.id}">Выполнено</button>
+        <button class="btn ghost sm" data-work="move" data-wid="${w.id}">Перенести</button>
+        <button class="btn ghost sm" data-work="cancel" data-wid="${w.id}">Отменить</button></div>` : ''}
+    </div>`).join('')}</div></div>`;
+}
+
+/** Деньги: окончательная цена, платежи, остаток. Предоплата сделку не закрывает. */
+function moneyHtml(c) {
+  const ps = (c.payments || []).filter((p) => !p.deleted_at);
+  const gone = (c.payments || []).filter((p) => p.deleted_at);
+  const m = state.pay_methods || {};
+  const quote = lead(c).price_quote;
+  const rest = c.deal_sum > 0 ? Math.max(0, c.deal_sum - (c.paid_sum || 0)) : 0;
+  const canPay = c.stage !== 'closed' || isOwner();
+  if (!c.deal_sum && !ps.length && !quote && c.stage === 'new') return '';
+  const today = new Intl.DateTimeFormat('sv-SE').format(new Date());
+  return `<div class="sect"><h4>Деньги</h4><div class="calc">
+      ${quote ? `<div class="l"><span>оценка бота</span><span>${esc(quote)}</span></div>` : ''}
+      <div class="l"><span>окончательная цена</span><span>${c.deal_sum ? fmtMoney(c.deal_sum) : '<span class="muted">не указана</span>'}</span></div>
+      ${ps.map((p) => `<div class="l pay"><span>${fmtD(p.paid_at)} · ${esc(m[p.method] || 'не указан')}${p.created_by ? ` · ${esc(p.created_by)}` : ''}${
+        p.note ? `<small>${esc(p.note)}</small>` : ''}</span><span>${fmtMoney(p.amount)}${canPay
+        ? ` <button class="linkbtn" data-paydel="${p.id}" title="Удалить платёж">✕</button>` : ''}</span></div>`).join('')}
+      ${ps.length ? `<div class="tot"><span>оплачено</span><span>${fmtMoney(c.paid_sum || 0)}</span></div>` : ''}
+      ${c.debt > 0 ? `<div class="tot debt"><span>задолженность</span><span>${fmtMoney(c.debt)}</span></div>`
+        : rest > 0 && ps.length ? `<div class="l"><span>осталось оплатить</span><span>${fmtMoney(rest)}</span></div>` : ''}
+      ${gone.length ? `<div class="l gone"><span>удалено платежей: ${gone.length}</span><span></span></div>` : ''}
+    </div>
+    ${canPay ? `<form class="pay-f" data-r="payf">
+      <div class="unit"><input type="number" name="amount" min="1" step="1" placeholder="${rest || ''}" value="${rest || ''}"><span>₪</span></div>
+      <select name="method">${Object.entries(m).map(([k, t]) => `<option value="${k}">${esc(t)}</option>`).join('')}</select>
+      <input type="date" name="paid_at" value="${today}">
+      <button class="btn sm" type="submit">Внести оплату</button></form>` : ''}</div>`;
+}
+
+/** Клиент и его сделки (ТЗ §4.1, §10): повторный заказ — отдельная сделка, история общая. */
+function dealsHtml(c) {
+  const others = (c.deals || []).filter((d) => d.id !== c.id);
+  const openOther = others.find((d) => d.stage !== 'closed' && !d.deleted_at);
+  const stage = (d) => (d.stage === 'closed' ? 'Закрыто · ' + colTitle(d.close_reason) : colTitle(d.stage));
+  return `<div class="sect"><h4>Клиент${others.length ? ` · сделок: ${others.length + 1}` : ''}</h4>
+    ${openOther ? `<div class="warns"><span class="warn-i amber">у клиента открыта ещё сделка #${openOther.id} — проверьте, не дубль ли</span></div>` : ''}
+    ${others.length ? `<div class="deals">${others.map((d) => `<a class="deal" data-deal="${d.id}">
+        <b>#${d.id}</b><span>${fmtD(d.created_at)} · ${esc(stage(d))}</span>
+        <span>${d.paid_sum ? fmtMoney(d.paid_sum) : d.deal_sum ? fmtMoney(d.deal_sum) : ''}</span>
+        <small dir="auto">${esc(d.ad_name || d.source_title || d.campaign_name || d.source || '')}</small></a>`).join('')}</div>`
+      : '<div class="muted" style="font-size:12px">других сделок нет</div>'}
+    <button class="btn ghost sm" data-a="new-deal" style="margin-top:8px">+ Новая сделка (повторный заказ)</button></div>`;
+}
+
+function bindDeals(root, convId) {
+  const call = async (url, body, msg) => {
+    try {
+      const r = await api(url, { method: 'POST', body: JSON.stringify(body || {}) });
+      if (msg) toast(msg);
+      loadList();
+      return r;
+    } catch (e) { toast(e.message, true); return null; }
+  };
+  $$('[data-work]', root).forEach((b) => b.onclick = async () => {
+    const act = b.dataset.work, wid = b.dataset.wid;
+    let body = {};
+    if (act === 'move') {
+      const date = prompt('Новая дата (ГГГГ-ММ-ДД)', new Intl.DateTimeFormat('sv-SE').format(new Date(Date.now() + 864e5)));
+      if (!date) return;
+      const reason = prompt('Причина переноса');
+      if (!reason) return;
+      body = { date, reason };
+    } else if (act === 'cancel') {
+      const reason = prompt('Причина отмены');
+      if (!reason) return;
+      body = { reason };
+    }
+    if (await call(`/api/conversations/${convId}/works/${wid}/${act}`, body,
+      act === 'done' ? 'Работа выполнена' : act === 'move' ? 'Работа перенесена' : 'Работа отменена')) openConv(convId, drawerOpen);
+  });
+  const pf = root.querySelector('[data-r="payf"]');
+  if (pf) pf.onsubmit = async (e) => {
+    e.preventDefault();
+    const body = Object.fromEntries(new FormData(pf).entries());
+    if (await call(`/api/conversations/${convId}/payments`, body, 'Оплата внесена')) openConv(convId, drawerOpen);
+  };
+  $$('[data-paydel]', root).forEach((b) => b.onclick = async () => {
+    const reason = prompt('Почему удаляете платёж? Он останется в истории');
+    if (!reason) return;
+    if (await call(`/api/conversations/${convId}/payments/${b.dataset.paydel}/delete`, { reason }, 'Платёж удалён')) openConv(convId, drawerOpen);
+  });
+  $$('[data-deal]', root).forEach((a) => a.onclick = () => openConv(Number(a.dataset.deal), drawerOpen));
+  const nd = root.querySelector('[data-a="new-deal"]');
+  if (nd) nd.onclick = async () => {
+    const r = await call(`/api/conversations/${convId}/new-deal`, {}, 'Новая сделка создана');
+    if (r?.id) openConv(r.id, drawerOpen);
+  };
 }
 
 /** Источник (ТЗ §4.1, §5): цепочка до объявления, статус атрибуции, ссылка в Ads Manager. */
@@ -1444,11 +1557,9 @@ function leadHtml(c) {
         ${q.lines.map((x) => `<div class="l"><span>${esc(x.label)}</span><span>${x.sum.toLocaleString('ru-RU')}</span></div>`).join('')}
         <div class="tot"><span>Итого</span><span>${q.total.toLocaleString('ru-RU')} ${esc(q.currency)}</span></div>
       </div></div>` : ''}
-    ${(c.deal_sum || c.paid_sum) ? `<div class="sect"><h4>Деньги</h4><div class="calc">
-        ${lead(c).price_quote ? `<div class="l"><span>оценка бота</span><span>${esc(lead(c).price_quote)}</span></div>` : ''}
-        ${c.deal_sum ? `<div class="l"><span>согласовано</span><span>${c.deal_sum.toLocaleString('ru-RU')} ₪</span></div>` : ''}
-        ${c.paid_sum ? `<div class="tot"><span>оплачено${c.paid_at ? ' · ' + esc(c.paid_at) : ''}</span><span>${c.paid_sum.toLocaleString('ru-RU')} ₪</span></div>` : ''}
-      </div></div>` : ''}
+    ${worksHtml(c)}
+    ${moneyHtml(c)}
+    ${dealsHtml(c)}
     ${thumbs ? `<div class="sect"><h4>Фото от клиента (${photos.length})</h4><div class="thumbs">${thumbs}</div></div>` : ''}
     ${rooms ? `<div class="sect"><h4>Что видно на фото</h4>${rooms}</div>` : ''}
     ${c.summary ? `<div class="sect"><h4>Суть</h4><div class="quote" dir="auto">${esc(c.summary)}</div></div>` : ''}
@@ -1460,6 +1571,7 @@ function leadHtml(c) {
 
 function bindLead(root, convId) {
   bindCalls(root, convId);
+  bindDeals(root, convId);
   const col = root.querySelector('[data-r="col"]');
   if (col) col.onchange = async () => {
     if (!(await moveTo(convId, col.value))) col.value = columnOf(convs.find((x) => x.id === convId) || {});
@@ -1760,6 +1872,8 @@ async function renderReport() {
       ${money('CPL · цена заявки', fmtMoney(t.cpl, cur))}
       ${money('CAC · цена клиента', fmtMoney(t.cac, cur))}
       ${money('ROAS', t.roas == null ? '—' : t.roas.toLocaleString('ru-RU') + '×', 'выручка на 1 ₪ рекламы')}
+      <div class="rep-k money" title="Работа выполнена, а оплачено меньше окончательной цены"><span>Задолженность</span>
+        ${num(t.ids.debt || [], fmtMoney(t.debt || 0, '₪'), (t.debt ? 'bad' : ''))}<small>${(t.ids.debt || []).length ? 'сделок: ' + t.ids.debt.length : '&nbsp;'}</small></div>
     </div>
     ${[r.spend_note, r.vat_note].filter(Boolean).map((n) => `<div class="rep-note">${esc(n)}</div>`).join('')}
     <div class="rep-head"><h3>Разбивка</h3><div class="seg" id="rep-group">${Object.entries(r.dims).map(([k, tt]) =>

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { getSetting } from './db.js';
+import { getSetting, getConversation } from './db.js';
 import { asImages } from './media.js';
 import { dominantLang, LANG_NAME } from './lang.js';
 import { quoteHint } from './pricing.js';
@@ -7,6 +7,19 @@ import { normalizeLead, SERVICES, CONDITIONS, STAGES } from './leadnorm.js';
 import { scheduleSetting, scheduleText, workHours, isHoliday } from './schedule.js';
 import * as anthropic from './providers/anthropic.js';
 import * as openai from './providers/openai.js';
+
+/** Повторный клиент (этап 5): новая сделка, но человек нам знаком — не знакомимся заново. */
+function repeatLine(conv) {
+  const prev = conv.prev_deal_id ? getConversation(conv.prev_deal_id) : null;
+  if (!prev) return '';
+  let l = {};
+  try { l = JSON.parse(prev.lead || '{}'); } catch {}
+  const known = [l.district, l.object_type, l.area_m2 ? l.area_m2 + ' м²' : ''].filter(Boolean).join(', ');
+  return 'ПОВТОРНЫЙ КЛИЕНТ: уже обращался к нам, это новый заказ.'
+    + (prev.close_reason === 'paid' ? ' Прошлая уборка была выполнена и оплачена.' : '')
+    + (known ? ` В прошлый раз: ${known}. Не спрашивай это заново — уточни одним вопросом, тот же ли объект.` : '')
+    + ' Поздоровайся как со знакомым.';
+}
 
 // AI_PROVIDER=anthropic (по умолчанию) | openai — любой OpenAI-совместимый эндпоинт
 const provider = (process.env.AI_PROVIDER || 'anthropic') === 'openai' ? openai : anthropic;
@@ -288,6 +301,7 @@ export async function generateReply(conv, messages, opts = {}) {
       + ' по-русски для менеджера: это служебные записи, а не образец для ответа.'
       + ' Клиент сменил язык - сменила и ты.',
     `Телефон клиента: ${conv.phone}.`,
+    repeatLine(conv),
     known.length
       ? `Уже известно по заявке: ${known.map(([k, v]) => `${k}=${v}`).join(', ')}. Это не переспрашивай.`
       : 'По заявке пока ничего не известно.',

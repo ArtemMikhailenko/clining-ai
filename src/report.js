@@ -19,6 +19,7 @@ import { localDate } from './schedule.js';
 import { stageIndex } from './stages.js';
 import { ATTR_TITLE, PLATFORM_TITLE } from './attribution.js';
 import { listManagers } from './calls.js';
+import { debtOf } from './deals.js';
 
 const parse = (s) => new Date(String(s).replace(' ', 'T') + 'Z');
 const leadOf = (c) => { try { return JSON.parse(c.lead || '{}'); } catch { return {}; } };
@@ -82,13 +83,17 @@ export function buildReport(q = {}) {
 
   const tally = (list) => {
     const ids = Object.fromEntries(METRICS.map((m) => [m, []]));
-    let revenue = 0;
+    let revenue = 0, debt = 0;
+    const debtIds = [];
     for (const c of list) {
       const f = facts(c, calls);
       for (const m of METRICS) if (f[m]) ids[m].push(c.id);
       if (f.paid) revenue += c.paid_sum;
+      // работа сделана, а оплачено меньше окончательной цены — задолженность (этап 5)
+      const d = debtOf(c);
+      if (d > 0) { debt += d; debtIds.push(c.id); }
     }
-    return { ids, counts: Object.fromEntries(METRICS.map((m) => [m, ids[m].length])), revenue };
+    return { ids: { ...ids, debt: debtIds }, counts: Object.fromEntries(METRICS.map((m) => [m, ids[m].length])), revenue, debt };
   };
 
   // расход: только по рекламным измерениям — по менеджеру или языку его не разделить
@@ -103,7 +108,7 @@ export function buildReport(q = {}) {
   const money = (t, spend) => {
     const net = netOf(t.revenue);
     return {
-      revenue: t.revenue, revenue_net: Math.round(net), spend: spend == null ? null : Math.round(spend * 100) / 100,
+      revenue: t.revenue, revenue_net: Math.round(net), debt: t.debt, spend: spend == null ? null : Math.round(spend * 100) / 100,
       cpl: spend && t.counts.leads ? Math.round(spend / t.counts.leads) : null,
       cac: spend && t.counts.paid ? Math.round(spend / t.counts.paid) : null,
       roas: spend ? Math.round(net / spend * 100) / 100 : null
