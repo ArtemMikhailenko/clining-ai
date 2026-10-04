@@ -494,14 +494,14 @@ stage: «уточняем», пока собираешь; «ждём видео�
 const seed = db.prepare('INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)');
 seed.run('system_prompt', DEFAULT_PROMPT);
 seed.run('ai_global', '1');
-// Раскрытие ИИ обязательно: правила WhatsApp и Anthropic требуют сказать об этом
-// хотя бы в начале диалога. Модель про него иногда «забывает» ради краткости,
-// поэтому приветствие шлёт код. {company} — название компании из настроек.
+// Приветствие шлёт код, а не модель: она его иногда «забывает» ради краткости.
+// По решению компании бот не называет себя виртуальным в приветствии; если клиент
+// спросит прямо, бот честно скажет, что он ИИ (правило в промпте). {company} — из настроек.
 const DEFAULT_GREETING = [
-  'ru: Здравствуйте! Я Лея, виртуальная помощница компании «{company}». Подскажу по уборке, а если нужно — сразу подключу менеджера.',
-  'uk: Вітаю! Я Лея, віртуальна помічниця компанії «{company}». Підкажу щодо прибирання, а якщо треба — одразу підключу менеджера.',
-  'he: שלום! כאן ליה, העוזרת הווירטואלית של {company}. אשמח לעזור בנושא הניקיון, ואם צריך — אחבר אתכם לנציג.',
-  "en: Hi! I'm Leah, the virtual assistant at {company}. Happy to help with the cleaning, and I can bring in a manager any time."
+  'ru: Здравствуйте! Я Лея из «{company}». Подскажу по уборке, а если нужно — сразу подключу менеджера.',
+  'uk: Вітаю! Я Лея з «{company}». Підкажу щодо прибирання, а якщо треба — одразу підключу менеджера.',
+  'he: שלום! כאן ליה מ-{company}. אשמח לעזור בנושא הניקיון, ואם צריך — אחבר אתכם לנציג.',
+  "en: Hi! I'm Leah from {company}. Happy to help with the cleaning, and I can bring in a manager any time."
 ].join('\n');
 seed.run('greeting', DEFAULT_GREETING);
 seed.run('business_hours', '');
@@ -600,7 +600,7 @@ seed.run('quick_replies', DEFAULT_QUICK);
 const LEGACY = {
   system_prompt: ['26de0a12bb145470', 'a9c5722304df87fb', '00be20aa4629945c', '55a44e45be23e8ae',
     '5ed39dacff13d58d', '8e94eb2c1620c96e', '6ccefb24f0d1cd0b'],
-  greeting: ['a6e77eadcb2e6ac0'],
+  greeting: ['a6e77eadcb2e6ac0', '706b4f1bd7d06778'],
   business_facts: ['9fa01d5721b12cc7', '9f58cbaa33cc3f94', '40de58dc7e5046b9', 'e6cfd0b06d1e9579',
     '554bfdf1d3fb381b'],
   quick_replies: ['e6d3dbf999f0655b']
