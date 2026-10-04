@@ -96,7 +96,7 @@ function stubReply(turns) {
 const MAX_IMAGES = 6;   // больше в один запрос слать незачем: дорого и без пользы
 const MAX_FRAMES = 8;   // картинок всего в запросе: из одного видео берём до 4 кадров
 
-async function toTurns(messages) {
+export async function toTurns(messages) {
   // Картинки прикладываем только те, что пришли ПОСЛЕ нашего последнего ответа.
   // Всё, что было раньше, модель уже описала — описание лежит в её же сообщениях
   // и в карточке заявки, а повторная отправка тех же фото просто жжёт токены
@@ -144,6 +144,10 @@ async function toTurns(messages) {
         text = (text ? text + '\n' : '') + note;
       }
     }
+
+    // пустое сообщение (реакция, стикер, клик по рекламе без текста) модель не принимает:
+    // «user messages must have non-empty content» — и весь ответ клиенту падает
+    if (!String(text ?? '').trim() && !images.length) continue;
 
     const prev = turns.at(-1);
     if (prev?.role === role && !images.length && !prev.images?.length) {
