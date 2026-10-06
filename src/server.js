@@ -216,6 +216,8 @@ app.get('/api/state', (req, res) => {
     nudge_steps_ask: getSetting('nudge_steps_ask'),
     nudge_steps_quoted: getSetting('nudge_steps_quoted'),
     confirm_on: getSetting('confirm_on') === '1',
+    mgr_ping_on: getSetting('mgr_ping_on') === '1',
+    notify_new_lead: getSetting('notify_new_lead') === '1',
     confirm_eve_hour: getSetting('confirm_eve_hour'),
     confirm_morning_hour: getSetting('confirm_morning_hour'),
     manager_ping_hours: getSetting('manager_ping_hours'),
@@ -267,6 +269,8 @@ app.post('/api/state', (req, res) => {
   }
   if ('nudge_on' in req.body) setSetting('nudge_on', req.body.nudge_on ? '1' : '0');
   if ('confirm_on' in req.body) setSetting('confirm_on', req.body.confirm_on ? '1' : '0');
+  if ('mgr_ping_on' in req.body) setSetting('mgr_ping_on', req.body.mgr_ping_on ? '1' : '0');
+  if ('notify_new_lead' in req.body) setSetting('notify_new_lead', req.body.notify_new_lead ? '1' : '0');
   for (const k of ['nudge_steps_ask', 'nudge_steps_quoted', 'stop_words']) {
     if (k in req.body) setSetting(k, String(req.body[k]).trim());
   }

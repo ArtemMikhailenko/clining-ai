@@ -74,6 +74,31 @@ export async function notifyManagers(text, { convId = null, owners = false, mana
   return true;
 }
 
+const PLATFORM = { facebook: 'Facebook', instagram: 'Instagram', whatsapp: 'статус WhatsApp' };
+
+/**
+ * Новая заявка: бот начал разговор с новым человеком. Команде полезнее знать о
+ * каждом новом клиенте, чем о том, что старый диалог молчит.
+ */
+export async function notifyNewLead(convId, firstText = '', media = []) {
+  if (getSetting('notify_new_lead') !== '1') return;
+  const c = db.prepare('SELECT * FROM conversations WHERE id=?').get(convId);
+  if (!c) return;
+  const ad = [c.campaign_name, c.ad_name || c.source_title].filter(Boolean).join(' › ');
+  const src = c.platform && c.platform !== 'organic'
+    ? `Реклама ${PLATFORM[c.platform] || ''}`.trim() + (ad ? `: ${ad}` : '')
+    : c.prev_deal_id ? 'повторный клиент' : 'без рекламы';
+  const what = String(firstText || '').trim().slice(0, 200)
+    || (media?.length ? `[${media.map((m) => (m.kind === 'video' ? 'видео' : m.kind === 'audio' ? 'голосовое' : 'фото')).join(', ')}]` : '');
+  await notifyManagers([
+    `🆕 Новая заявка${c.prev_deal_id ? ' (повторный клиент)' : ''} — ${c.name || 'клиент'}, +${c.phone}`,
+    `Источник: ${src}`,
+    what ? `Пишет: ${what}` : '',
+    'Бот уже отвечает.',
+    adminLink(convId)
+  ].filter(Boolean).join('\n'), { owners: true });
+}
+
 export const adminLink = (convId) => (adminUrl() ? `${adminUrl()}/?conv=${convId}` : '');
 
 /** Шлём один раз на передачу: пока менеджер не ответил, повторно не дёргаем. */

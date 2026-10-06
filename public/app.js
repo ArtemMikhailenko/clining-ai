@@ -2132,8 +2132,11 @@ function renderSettings() {
           srow('Подтверждать заказы', '', `<label class="switch"><input type="checkbox" id="f-confirmon" ${s.confirm_on ? 'checked' : ''}></label>`)
           + srow('Накануне, в котором часу', '', unit('f-confirmeve', s.confirm_eve_hour ?? 18, 'часов', 8, 22))
           + srow('В день уборки, в котором часу', '', unit('f-confirmmorning', s.confirm_morning_hour ?? 8, 'часов', 6, 12))
-          + srow('Напомнить менеджеру о тихом диалоге', 'Диалоги, которые ведёт человек, бот не дожимает — вместо этого пишет менеджеру.',
-            unit('f-mgrping', s.manager_ping_hours ?? 48, 'часов', 2, 336)))
+          + srow('Сообщать о новой заявке', 'Как только бот начал разговор с новым человеком, менеджерам и владельцу придёт: кто, с какого объявления и что пишет.',
+            `<label class="switch"><input type="checkbox" id="f-newlead" ${s.notify_new_lead ? 'checked' : ''}></label>`)
+          + srow('Напоминать о тихом диалоге', 'Диалог ведёт человек, а клиент молчит — бот пишет менеджеру «диалог молчит». По умолчанию выключено.',
+            `<label class="switch"><input type="checkbox" id="f-mgrpingon" ${s.mgr_ping_on ? 'checked' : ''}></label>`)
+          + srow('Через сколько часов тишины', '', unit('f-mgrping', s.manager_ping_hours ?? 48, 'часов', 2, 336)))
         + grp('Фото и видео', 'Для каких видов уборки материал обязателен. Пока клиент не прислал ни фото, ни видео, заявка помечается «Ждём фото/видео».',
           MEDIA_SERVICES.map((v, i) => srow(v, '', `<label class="switch"><input type="checkbox" class="f-media" data-v="${esc(v)}" ${
             String(s.media_required || '').split(',').map((x) => x.trim()).includes(v) ? 'checked' : ''}></label>`)).join(''))
@@ -2403,6 +2406,8 @@ async function saveSettings() {
   put('#f-stepsask', 'nudge_steps_ask'); put('#f-stepsquoted', 'nudge_steps_quoted'); put('#f-stopwords', 'stop_words');
   put('#f-confirmeve', 'confirm_eve_hour'); put('#f-confirmmorning', 'confirm_morning_hour'); put('#f-mgrping', 'manager_ping_hours');
   if ($('#f-confirmon')) body.confirm_on = $('#f-confirmon').checked;
+  if ($('#f-newlead')) body.notify_new_lead = $('#f-newlead').checked;
+  if ($('#f-mgrpingon')) body.mgr_ping_on = $('#f-mgrpingon').checked;
   put('#f-nudgestale', 'nudge_stale_hours'); put('#f-nudgeh', 'nudge_hours'); put('#f-nudgerep', 'nudge_repeat_hours'); put('#f-nudgemax', 'nudge_max');
   if ($('#f-nudgeon')) body.nudge_on = $('#f-nudgeon').checked;
   if ($$('.f-media').length) body.media_required = $$('.f-media').filter((x) => x.checked).map((x) => x.dataset.v).join(', ');

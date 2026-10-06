@@ -6,7 +6,7 @@ import { mediaPath } from './media.js';
 import fs from 'node:fs';
 import { withinWorkHours, scheduleSetting, sweepStale, workHours, isHoliday } from './schedule.js';
 import { quote } from './pricing.js';
-import { notifyHandoff } from './notify.js';
+import { notifyHandoff, notifyNewLead } from './notify.js';
 import { assignHandoff } from './calls.js';
 import { logFailure } from './integrations.js';
 import { amountOf } from './stages.js';
@@ -225,6 +225,8 @@ async function processIncoming({ phone, name, text, wa_id, chat_id = null, media
   }
   // пришёл с новой рекламы после закрытой сделки — это новая сделка со своим источником
   const conv = getOrCreateConversation(ch.name, phone, name, chat_id, { fromAd: Boolean(ref) });
+  // новая заявка — сделка без единого сообщения: о ней команда узнаёт сразу
+  const isNewLead = !db.prepare('SELECT 1 FROM messages WHERE conv_id=? LIMIT 1').get(conv.id);
   // откуда клиент: карточка объявления от WhatsApp или метка #… в тексте ссылки.
   // Если в справочнике кампаний нашёлся ключ — пишем название кампании, а не «Реклама Facebook»
   const src = ref || tagSource(text);
@@ -249,6 +251,7 @@ async function processIncoming({ phone, name, text, wa_id, chat_id = null, media
   const body = [text, said].filter(Boolean).join('\n');
 
   const msg = addMessage(conv.id, { direction: 'in', author: 'customer', body, wa_id, media });
+  if (isNewLead) notifyNewLead(conv.id, body, media).catch((e) => console.error('уведомление о новой заявке:', e.message));
   // язык клиента — признак для отчёта по рекламе (ТЗ §9: фильтр по языку)
   const lang = dominantLang(history(conv.id, 12));
   if (lang) db.prepare('UPDATE conversations SET lang=? WHERE id=?').run(lang, conv.id);
@@ -627,7 +630,7 @@ export async function runFollowUps() {
         const later = (d) => d && String(d).slice(0, 10) > today;
         const expected = later(conv.followup_at) || later(lead.date_iso) || later(conv.job_date)
           || later(conv.next_action_at) || conv.call_due_at;
-        if (!expected && conv.last_dir === 'out' && silent >= cfg.managerPing && !recently(conv.mgr_ping_at, 72)) {
+        if (cfg.managerPingOn && !expected && conv.last_dir === 'out' && silent >= cfg.managerPing && !recently(conv.mgr_ping_at, 72)) {
           const who = lead.name || conv.name || `+${conv.phone}`;
           const ok = await notifyManagers(`⏳ Диалог молчит ${Math.round(silent)} ч — ${who}`
             + `${lead.price_quote ? `, названа цена ${lead.price_quote}` : ''}\n${adminLink(conv.id)}`, { convId: conv.id });

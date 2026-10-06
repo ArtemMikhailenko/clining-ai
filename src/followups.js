@@ -58,7 +58,8 @@ export const settings = () => ({
   max: num('nudge_max', 2),
   stale: num('nudge_stale_hours', 336),
   confirmOn: getSetting('confirm_on') === '1',
-  managerPing: num('manager_ping_hours', 48)
+  managerPing: num('manager_ping_hours', 48),
+  managerPingOn: getSetting('mgr_ping_on') === '1'
 });
 
 /** Вне 24 часов от последнего сообщения клиента: на официальном API это платный шаблон. */
