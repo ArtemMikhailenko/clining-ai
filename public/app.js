@@ -206,6 +206,7 @@ const PAGES = {
               render: () => (leadView === 'list' ? renderLeads() : renderBoard()),
               tools: leadsTools },
   cal:      { title: 'Расписание', tpl: 'tpl-cal',  render: renderCal,   tools: calTools },
+  tasks:    { title: 'Задачи',       tpl: null,     render: renderTasks,   tools: tasksTools },
   control:  { title: 'Контроль дня', tpl: null,     render: renderControl, tools: controlTools },
   report:   { title: 'Отчёт',        tpl: null,     render: renderReport, tools: reportTools },
   settings: { title: 'Настройки', tpl: null,        render: renderSettings, tools: () => '' }
@@ -1917,6 +1918,83 @@ async function showRepList(ids, btn) {
   box.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
+/* ───── задачи: кому, когда и что сделать ───── */
+let tasksBadgeAt = 0;
+async function updateTasksBadge() {
+  if (Date.now() - tasksBadgeAt < 30000) return;     // список заявок обновляется часто — задачи хватит раз в полминуты
+  tasksBadgeAt = Date.now();
+  try {
+    const d = await api('/api/tasks');
+    const u = me();
+    const n = d.items.filter((t) => (t.bucket === 'late' || t.bucket === 'today')
+      && (u.role === 'owner' || !u.id || t.manager_id === u.id || t.kind === 'bot')).length;
+    for (const b of [$('#nav-tasks'), $('#tab-tasks')]) if (b) { b.textContent = n; b.classList.toggle('hidden', !n); }
+  } catch {}
+}
+let tasksWho = 'all';     // all | mine
+let tasksKind = 'all';
+const TASK_KIND = { call: 'Позвонить', task: 'Действие', bot: 'Бот напишет', job: 'Уборка', pay: 'Оплата' };
+const TASK_BUCKET = { late: 'Просрочено', today: 'Сегодня', tomorrow: 'Завтра', week: 'На этой неделе', later: 'Позже', nodate: 'Без срока' };
+
+function tasksTools() {
+  const u = me();
+  return `<div class="seg" id="tk-who">
+      <button data-w="all" class="${tasksWho === 'all' ? 'on' : ''}">Все</button>
+      ${u.id ? `<button data-w="mine" class="${tasksWho === 'mine' ? 'on' : ''}">Мои</button>` : ''}</div>
+    <div class="seg" id="tk-kind"><button data-k="all" class="${tasksKind === 'all' ? 'on' : ''}">Все типы</button>${
+      Object.entries(TASK_KIND).map(([k, t]) => `<button data-k="${k}" class="${tasksKind === k ? 'on' : ''}">${t}</button>`).join('')}</div>`;
+}
+
+async function renderTasks() {
+  if (!$('#tk')) $('#content').innerHTML = '<div class="tk" id="tk"><div class="empty">загружаем…</div></div>';
+  $$('#tk-who button').forEach((b) => b.onclick = () => { tasksWho = b.dataset.w; go('tasks'); });
+  $$('#tk-kind button').forEach((b) => b.onclick = () => { tasksKind = b.dataset.k; go('tasks'); });
+  let data;
+  try { data = await api('/api/tasks'); } catch (e) { $('#tk').innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  if (page !== 'tasks') return;
+  const u = me();
+  const items = data.items.filter((t) => (tasksKind === 'all' || t.kind === tasksKind)
+    && (tasksWho !== 'mine' || t.manager_id === u.id));
+  const late = items.filter((t) => t.bucket === 'late').length;
+  const today = items.filter((t) => t.bucket === 'today').length;
+  $('#pg-sub').textContent = `${items.length} ${plural(items.length, 'задача', 'задачи', 'задач')}`
+    + (late ? ` · просрочено ${late}` : '') + (today ? ` · сегодня ${today}` : '');
+
+  const when = (t) => {
+    if (!t.day) return '';
+    if (t.timed && t.at) return t.bucket === 'today' || t.bucket === 'late' && t.day === data.today ? hhmm(t.at) : dayTime(t.at);
+    const d = new Date(t.day + 'T12:00:00Z');
+    return d.toLocaleDateString('ru-RU', { weekday: 'short', day: 'numeric', month: 'short' });
+  };
+  const stage = (t) => (t.stage === 'closed' ? 'Закрыто · ' + colTitle(t.close_reason) : colTitle(t.stage));
+  const groups = Object.keys(TASK_BUCKET).map((b) => [b, items.filter((t) => t.bucket === b)]).filter(([, l]) => l.length);
+
+  $('#tk').innerHTML = groups.length ? groups.map(([b, list]) => `<section class="tk-g ${b}">
+      <h3>${TASK_BUCKET[b]} <span>${list.length}</span></h3>
+      <div class="tk-list">${list.map((t) => `<div class="tk-row tk-${t.kind} ${t.late ? 'late' : ''}" data-conv="${t.conv_id}">
+        <span class="tk-when">${esc(when(t))}</span>
+        <span class="tk-kind tk-k-${t.kind}">${TASK_KIND[t.kind]}</span>
+        <span class="tk-what"><b dir="auto">${esc(t.what)}</b>
+          <small dir="auto">${esc(t.name || '+' + t.phone)}${t.name ? ' · +' + esc(t.phone) : ''}${t.district ? ' · ' + esc(t.district) : ''} · ${esc(stage(t))}</small></span>
+        <span class="tk-who">${esc(t.who || '—')}</span>
+        <span class="tk-act">${t.kind === 'task' ? `<button class="btn sm" data-done="${t.conv_id}">Сделано</button>` : ''}</span>
+      </div>`).join('')}</div></section>`).join('')
+    : `<div class="empty" style="padding:60px 20px">${tasksWho === 'mine' ? 'У вас задач нет' : 'Запланированных задач нет'}</div>`;
+
+  $$('#tk .tk-row').forEach((r) => r.onclick = (e) => {
+    if (e.target.closest('button')) return;
+    current = Number(r.dataset.conv);
+    go('inbox');
+  });
+  $$('#tk [data-done]').forEach((b) => b.onclick = async () => {
+    try {
+      await api(`/api/conversations/${b.dataset.done}/next`, { method: 'POST', body: JSON.stringify({ done: true }) });
+      toast('Отмечено. Не забудьте задать следующее действие в карточке');
+      renderTasks();
+    } catch (e) { toast(e.message, true); }
+  });
+}
+
 /* ───── настройки ───── */
 const SET_SECTIONS = [
   { k:'company', t:'Компания', d:'название и часовой пояс',
@@ -2479,6 +2557,7 @@ async function loadList() {
   }
   const need = convs.filter((c) => c.needs_human).length;
   const redN = convs.filter((c) => c.stage !== 'closed' && (c.warn || []).some((w) => w.level === 'red')).length;
+  updateTasksBadge();
   const rb = $('#nav-red');
   if (rb) { rb.textContent = redN; rb.classList.toggle('hidden', !redN); }
   const badge = $('#nav-need');
@@ -2764,5 +2843,5 @@ const deepLink = Number(new URLSearchParams(location.search).get('conv'));
 if (deepLink) current = deepLink;            // ссылка из уведомления менеджеру
 // ссылка из вечернего отчёта ведёт прямо на «Контроль дня»
 loadState().then(() => { go(location.hash === '#control' && !deepLink ? 'control' : 'inbox'); loadList(); loadStats(); });
-setInterval(() => { if (page === 'inbox' || page === 'control') PAGES[page].render(); }, 60000);
+setInterval(() => { if (['inbox', 'control', 'tasks'].includes(page)) PAGES[page].render(); }, 60000);
 setInterval(loadState, 60000);   // «рабочее время» должно переключаться само

@@ -15,7 +15,7 @@ import { quote, priceList } from './pricing.js';
 import { waStatus, onStatus, requestPairing, logout as waLogout, restart as waRestart } from './channels/baileys.js';
 import { sttLabel } from './stt.js';
 import { notifyManagers, adminLink, localTime } from './notify.js';
-import { annotate, setNext, controlDay, startControl } from './control.js';
+import { annotate, setNext, controlDay, startControl, tasksList } from './control.js';
 import { runAs } from './context.js';
 import { ADMIN, authEnabled, sessionUser, basicUser, readCookie, setCookie, login, logout, changeOwnPassword,
   setPassword, dropSessions, recUrl, recValid } from './auth.js';
@@ -911,6 +911,9 @@ app.post('/api/conversations/:id/next', (req, res) => {
   emit('conversations', null);
   res.json(getConversation(id));
 });
+
+/** Задачи: кому, когда и что сделать — все запланированные действия одним списком. */
+app.get('/api/tasks', (req, res) => res.json(tasksList()));
 
 /** «Контроль дня» (ТЗ §8): по дате в часовом поясе компании. */
 app.get('/api/control', (req, res) => {

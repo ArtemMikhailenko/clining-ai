@@ -1339,6 +1339,36 @@ button,a,.lrow,.card,.frow{-webkit-tap-highlight-color:transparent;touch-action:
 .deal:hover{background:var(--side-hover)}
 .deal b{color:var(--text)}
 .deal small{grid-column:1/-1;color:var(--muted);font-size:11px}
+/* задачи */
+.tk{padding:18px 22px 28px;display:flex;flex-direction:column;gap:18px;width:100%;max-width:1100px;margin:0 auto;box-sizing:border-box}
+.tk-g h3{margin:0 0 8px;font-size:13px;font-weight:600;color:var(--text-2);display:flex;align-items:center;gap:8px}
+.tk-g h3 span{font-size:11.5px;font-weight:500;color:var(--muted);background:var(--surface-3);border-radius:99px;padding:0 7px}
+.tk-g.late h3{color:var(--danger)}
+.tk-g.today h3{color:var(--accent)}
+.tk-list{background:var(--surface);border:var(--hair) solid var(--border);border-radius:var(--r-lg);overflow:hidden}
+.tk-row{display:grid;grid-template-columns:96px 104px minmax(0,1fr) 130px 90px;gap:12px;align-items:center;padding:10px 14px;
+  border-bottom:var(--hair) solid var(--border-soft);cursor:pointer;font-size:13px}
+.tk-row:last-child{border-bottom:0}
+.tk-row:hover{background:var(--side-hover)}
+.tk-when{font-variant-numeric:tabular-nums;color:var(--text-2);white-space:nowrap}
+.tk-row.late .tk-when{color:var(--danger);font-weight:540}
+.tk-kind{justify-self:start;font-size:11px;padding:2px 8px;border-radius:6px;background:var(--surface-3);color:var(--text-2);white-space:nowrap}
+.tk-kind.tk-k-call{background:var(--human-soft);color:var(--human)}
+.tk-kind.tk-k-task{background:var(--accent-soft);color:var(--accent)}
+.tk-kind.tk-k-bot{background:var(--surface-3);color:var(--text-2)}
+.tk-kind.tk-k-job{background:var(--green-soft);color:var(--green)}
+.tk-kind.tk-k-pay{background:var(--warn-soft);color:var(--warn)}
+.tk-what{min-width:0}
+.tk-what b{display:block;font-weight:540;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tk-what small{display:block;font-size:11.5px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tk-who{color:var(--text-2);font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tk-act{justify-self:end}
+#tk-kind{flex-wrap:wrap}
+@media (max-width:720px){
+  .tk{padding:12px 16px 24px}
+  .tk-row{grid-template-columns:auto 1fr auto;grid-template-areas:"when kind act" "what what what" "who who who";gap:4px 10px}
+  .tk-when{grid-area:when}.tk-kind{grid-area:kind}.tk-what{grid-area:what}.tk-who{grid-area:who;font-size:11.5px}.tk-act{grid-area:act}
+}
 </style>
 </head>
 <body>
@@ -1354,6 +1384,7 @@ button,a,.lrow,.card,.frow{-webkit-tap-highlight-color:transparent;touch-action:
 
     <nav class="nav" id="nav">
       <a data-p="inbox" class="on" title="Заявки"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg><span class="lbl">Заявки</span><span class="cnt hidden" id="nav-need"></span></a>
+      <a data-p="tasks" title="Задачи"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6h11M9 12h11M9 18h11"/><path d="m3.5 6 1.2 1.2L7 5M3.5 12l1.2 1.2L7 11M3.5 18l1.2 1.2L7 17"/></svg><span class="lbl">Задачи</span><span class="cnt hidden" id="nav-tasks"></span></a>
       <a data-p="control" title="Контроль дня"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="3.5" width="16" height="18" rx="2.5"/><path d="M9 3.5V2.5h6v1M8.5 11l2 2 4-4M8.5 17h7"/></svg><span class="lbl">Контроль дня</span><span class="cnt hidden" id="nav-red"></span></a>
       <a data-p="report" title="Отчёт"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19V5M4 19h16"/><path d="M8 15l3.5-4 3 2.5L20 7"/><circle cx="20" cy="7" r="1.2" fill="currentColor"/></svg><span class="lbl">Отчёт</span></a>
       <a data-p="cal" title="Расписание"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="17" rx="3"/><path d="M16 2.5v3M8 2.5v3M3 10h18"/></svg><span class="lbl">Расписание</span><span class="cnt soft hidden" id="nav-cal"></span></a>
@@ -1402,7 +1433,7 @@ button,a,.lrow,.card,.frow{-webkit-tap-highlight-color:transparent;touch-action:
 <nav class="tabbar" id="tabbar">
   <a data-p="inbox"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg><span>Заявки</span><i class="cnt hidden" id="tab-need"></i></a>
   <a data-p="cal"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="17" rx="3"/><path d="M16 2.5v3M8 2.5v3M3 10h18"/></svg><span>Расписание</span></a>
-  <a data-p="dash"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="M18 17V9M13 17V5M8 17v-3"/></svg><span>Сводка</span></a>
+  <a data-p="tasks"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6h11M9 12h11M9 18h11"/><path d="m3.5 6 1.2 1.2L7 5M3.5 12l1.2 1.2L7 11M3.5 18l1.2 1.2L7 17"/></svg><span>Задачи</span><i class="cnt hidden" id="tab-tasks"></i></a>
   <a data-p="settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7h-9M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/></svg><span>Настройки</span></a>
   <a id="tab-menu"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h16"/></svg><span>Меню</span></a>
 </nav>

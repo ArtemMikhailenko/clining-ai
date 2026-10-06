@@ -269,3 +269,71 @@ export function startControl() {
     eveningReport().catch((e) => console.error('вечерний отчёт:', e.message)); };
   setInterval(tick, 6e4).unref?.();
 }
+
+/* ─────────── Задачи: всё, что запланировано, одним списком ─────────── */
+
+const addDays = (iso, n) => { const d = new Date(iso + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
+
+/**
+ * Кому, когда и что сделать: звонки по сроку, действия менеджеров,
+ * «бот напишет клиенту», назначенные уборки и долги. Отдельной таблицы задач
+ * нет — список собирается из тех же полей, что видны в карточке, поэтому
+ * не расходится с ней.
+ */
+export function tasksList() {
+  const today = localDate();
+  const convs = db.prepare(`SELECT * FROM conversations WHERE deleted_at IS NULL
+    AND (status != 'closed' OR next_action IS NOT NULL OR followup_at IS NOT NULL)`).all();
+  const items = [];
+  const who = (id) => getManager(id)?.name || '';
+  const base = (c) => {
+    let l = {};
+    try { l = JSON.parse(c.lead || '{}'); } catch {}
+    return { conv_id: c.id, name: l.name || c.name || '', phone: c.phone, stage: c.stage, close_reason: c.close_reason,
+      district: l.district || '', service: l.service || '' };
+  };
+  for (const c of convs) {
+    if (c.call_due_at && c.status !== 'closed') {
+      items.push({ ...base(c), kind: 'call', what: 'позвонить', at: c.call_due_at, timed: true,
+        day: localDate(parse(c.call_due_at)), who: who(c.manager_id), manager_id: c.manager_id });
+    }
+    if (c.next_action) {
+      const m = c.next_action_mgr || c.manager_id;
+      items.push({ ...base(c), kind: 'task', what: c.next_action, at: c.next_action_at, timed: true,
+        day: c.next_action_at ? localDate(parse(c.next_action_at)) : null, who: who(m), manager_id: m });
+    }
+    // по закрытой заявке бот клиенту не пишет — такое напоминание задачей не считаем
+    if (c.followup_at && (c.status !== 'closed' || c.followup_who === 'manager')) {
+      const manual = c.followup_who === 'manager';
+      items.push({ ...base(c), kind: manual ? 'task' : 'bot', what: c.followup_note || (manual ? 'напомнить' : 'бот напишет клиенту'),
+        at: c.followup_at, timed: false, day: c.followup_at, who: manual ? who(c.manager_id) : 'бот', manager_id: manual ? c.manager_id : null });
+    }
+    const debt = debtOf(c);
+    if (debt > 0) {
+      items.push({ ...base(c), kind: 'pay', what: `получить оплату ${debt.toLocaleString('ru-RU')} ₪`, at: null, timed: false,
+        day: null, who: who(c.manager_id), manager_id: c.manager_id });
+    }
+  }
+  // назначенные уборки — из работ, у каждой своя дата
+  for (const j of db.prepare(`SELECT j.*, c.manager_id, c.stage, c.lead, c.name AS cname, c.phone AS cphone, c.close_reason
+      FROM jobs j JOIN conversations c ON c.id = j.conv_id
+      WHERE j.status = 'planned' AND c.deleted_at IS NULL AND j.date >= ?`).all(addDays(today, -14))) {
+    let l = {};
+    try { l = JSON.parse(j.lead || '{}'); } catch {}
+    items.push({ conv_id: j.conv_id, name: l.name || j.cname || '', phone: j.cphone, stage: j.stage, close_reason: j.close_reason,
+      district: l.district || '', service: l.service || '', kind: 'job', what: 'уборка' + (j.time ? ' в ' + j.time : ''),
+      at: j.date + (j.time ? ' ' + j.time : ''), timed: false, day: j.date, who: who(j.manager_id), manager_id: j.manager_id });
+  }
+
+  const now = Date.now();
+  for (const it of items) {
+    it.late = it.timed ? Boolean(it.at && parse(it.at) <= now) : Boolean(it.day && it.day < today && it.kind !== 'job');
+    it.bucket = !it.day ? 'nodate' : it.late || it.day < today ? 'late'
+      : it.day === today ? 'today' : it.day === addDays(today, 1) ? 'tomorrow'
+      : it.day <= addDays(today, 7) ? 'week' : 'later';
+  }
+  const order = { late: 0, today: 1, tomorrow: 2, week: 3, later: 4, nodate: 5 };
+  items.sort((a, b) => order[a.bucket] - order[b.bucket] || String(a.day || '').localeCompare(String(b.day || ''))
+    || String(a.at || '').localeCompare(String(b.at || '')));
+  return { today, items };
+}
