@@ -110,12 +110,12 @@ const plural = (n, a, b, c) => { const m = n % 100, k = n % 10;
 /* ───── колонки доски: комбинация владельца диалога и стадии воронки ───── */
 // Воронка по ТЗ §3: колонка — это этап сделки. Кто ведёт диалог (бот или
 // менеджер) и «нужен менеджер» — признаки на карточке, а не колонки.
+// На доске две рабочие колонки — так работает команда: «дожимаем», пока не закроем
+// дату, и «дата закрыта», пока не оплатят. Этапы ТЗ внутри сохраняются (новая,
+// уточнение, предложение / согласовано, выполнено) — на них держатся отчёт и контроль.
 const COLUMNS = [
-  { k:'new',     t:'Новая',                   c:'var(--muted)',  hint:'бот ещё не начал разговор' },
-  { k:'clarify', t:'Уточнение',               c:'var(--accent)', hint:'собираем данные по заявке' },
-  { k:'offer',   t:'Предложение отправлено',  c:'var(--s4)',     hint:'менеджер назвал окончательную цену' },
-  { k:'agreed',  t:'Согласовано / назначено', c:'var(--s3)',     hint:'цена и дата подтверждены' },
-  { k:'done',    t:'Выполнено',               c:'var(--s1)',     hint:'уборка сделана, ждём оплату' }
+  { k:'work',   t:'Дожимаем',     c:'var(--accent)', stages: ['new', 'clarify', 'offer'], hint:'уточняем, предлагаем цену, звоним — пока не закроем дату' },
+  { k:'agreed', t:'Дата закрыта', c:'var(--s3)',     stages: ['agreed', 'done'],          hint:'цена и дата согласованы — ждём уборку и оплату' }
 ];
 // Закрытые сделки — по подстатусам. «Неквалифицировано» разбито на две
 // корзины, как просил менеджер; для отчёта это один подстатус.
@@ -132,9 +132,11 @@ function columnOf(c) {
   if (c.stage === 'closed' || c.status === 'closed') {
     return ARCHIVE.some((x) => x.k === c.close_reason) ? c.close_reason : 'lost';
   }
-  return COLUMNS.some((x) => x.k === c.stage) ? c.stage : 'new';
+  return COLUMNS.find((x) => x.stages.includes(c.stage || 'new'))?.k || 'work';
 }
-const colTitle = (k) => (ALL_COLS.find((x) => x.k === k) || { t: k }).t;
+// этапы ТЗ под колонками — для истории, списков и задач
+const STAGE_T = { new: 'Новая', clarify: 'Уточнение', offer: 'Предложение отправлено', agreed: 'Согласовано', done: 'Выполнено' };
+const colTitle = (k) => (ALL_COLS.find((x) => x.k === k) || { t: STAGE_T[k] || k }).t;
 
 let flagFilter = null;   // 'need' | 'review' | 'call' | 'late' — признаки, по которым смотрят очередь
 // звонок по заявке (ТЗ §2.2): ждём — до срока, просрочен — после
@@ -706,7 +708,12 @@ async function moveTo(id, key) {
     reason = prompt('Почему сделка проиграна? Например: дорого, выбрал другую компанию, передумал');
     if (!reason || !reason.trim()) { toast('Без причины проигрыш не сохраняется', true); return false; }
   }
-  const body = isArchive(key) ? { stage: 'closed', close: key, reason } : { stage: key };
+  // колонка доски → этап: в «Дожимаем» возвращаем на уточнение, если заявка была дальше;
+  // в «Дату закрыта» — согласовано
+  const cur = convs.find((c) => c.id === id);
+  const col = COLUMNS.find((x) => x.k === key);
+  const stage = !col ? key : col.stages.includes(cur?.stage) ? cur.stage : col.k === 'work' ? 'clarify' : 'agreed';
+  const body = isArchive(key) ? { stage: 'closed', close: key, reason } : { stage };
   try {
     const updated = await api(`/api/conversations/${id}/stage`, { method: 'POST', body: JSON.stringify(body) });
     const landed = columnOf(updated);
