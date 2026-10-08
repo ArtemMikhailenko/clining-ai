@@ -2842,6 +2842,13 @@ fetch('/api/wa/status').then((r) => r.json()).then(renderWa).catch(() => {});
 const deepLink = Number(new URLSearchParams(location.search).get('conv'));
 if (deepLink) current = deepLink;            // ссылка из уведомления менеджеру
 // ссылка из вечернего отчёта ведёт прямо на «Контроль дня»
-loadState().then(() => { go(location.hash === '#control' && !deepLink ? 'control' : 'inbox'); loadList(); loadStats(); });
+// ссылка из уведомления менеджеру: на телефоне средней панели нет — карточку открываем поверх
+// списка; адрес чистим, чтобы перезагрузка страницы не открывала её снова
+const openDeepLink = () => {
+  if (!deepLink) return;
+  if (isMobile()) openConv(deepLink, true);
+  history.replaceState(null, '', location.pathname + location.hash);
+};
+loadState().then(() => { go(location.hash === '#control' && !deepLink ? 'control' : 'inbox'); loadList(); loadStats(); openDeepLink(); });
 setInterval(() => { if (['inbox', 'control', 'tasks'].includes(page)) PAGES[page].render(); }, 60000);
 setInterval(loadState, 60000);   // «рабочее время» должно переключаться само
