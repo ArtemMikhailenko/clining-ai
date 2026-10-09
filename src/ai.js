@@ -380,7 +380,8 @@ export async function generateReply(conv, messages, opts = {}) {
   }
   replies = kept;
   // страховка: если модель всё же поздоровалась после автоприветствия — убираем повтор
-  const GREET = /^(здравствуйте|добрый (день|вечер)|доброе утро|привет|вітаю|доброго дня|שלום|hi|hello)[!,.\s—-]*/i;
+  // «היי» и «hey» тоже приветствие: без них бот писал «היי!» сразу после «שלום! כאן ליה…»
+  const GREET = /^(здравствуйте|добрый (день|вечер)|доброе утро|привет|вітаю|доброго дня|שלום|היי+|הי|hi|hey|hello)(?=[!,.\s—-]|$)[!,.\s—-]*/i;
   if (firstReply && replies.length && GREET.test(replies[0])) {
     const rest = replies[0].replace(GREET, '').trim();
     if (rest) replies[0] = rest[0].toUpperCase() + rest.slice(1); else replies.shift();
