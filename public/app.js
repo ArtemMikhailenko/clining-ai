@@ -94,6 +94,16 @@ function ago(s) {
   if (min < 1440) return Math.floor(min / 60) + ' ч';
   return dt(s).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' });
 }
+/** Время последнего сообщения, как в мессенджере: сегодня — часы, вчера, день недели, дата. */
+function msgTime(s) {
+  if (!s) return '';
+  const d = dt(s), n = new Date(), day = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate());
+  const diff = Math.round((day(n) - day(d)) / 864e5);
+  if (diff === 0) return d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+  if (diff === 1) return 'вчера';
+  if (diff < 7) return d.toLocaleDateString('ru-RU', { weekday: 'short' });
+  return d.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' });
+}
 function dayLabel(s) {
   const d = dt(s), n = new Date(), day = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate());
   const diff = (day(n) - day(d)) / 864e5;
@@ -675,13 +685,13 @@ function cardHtml(c) {
     <div class="card-top">
       <span class="ava">${esc(initials(l.name || c.name, c.phone))}</span>
       <div class="card-id"><b dir="auto">${esc(l.name || c.name || '+' + c.phone)}</b><span>+${esc(c.phone)}</span></div>
-      ${c.unread ? `<span class="badge">${c.unread}</span>` : ''}
+      <span class="card-meta"><span class="card-time ${c.unread ? 'new' : ''}">${msgTime(c.last_at)}</span>
+        ${c.unread ? `<span class="badge">${c.unread}</span>` : ''}</span>
     </div>
     ${facts ? `<div class="facts">${facts}</div>` : ''}
     ${thumbs ? `<div class="card-thumbs">${thumbs}</div>` : ''}
     <div class="card-snip" dir="auto">${esc(c.summary || c.last_body || '')}</div>
-    <div class="card-foot">${chipFor(c)}${waitHtml(c)}
-      <span class="t">${c.needs_human && c.last_in_at ? '' : ago(c.last_at)}</span></div>
+    <div class="card-foot">${chipFor(c)}${waitHtml(c)}</div>
   </div>`;
 }
 
@@ -797,6 +807,8 @@ function renderBoard() {
   const rows = convs.filter(matches).filter((c) => isArchive(columnOf(c)) === (leadView === 'archive'));
   const by = Object.fromEntries(ALL_COLS.map((x) => [x.k, []]));
   rows.forEach((c) => by[columnOf(c)].push(c));
+  // как в мессенджере: сверху тот, кто писал последним
+  for (const k of Object.keys(by)) by[k].sort((a, b) => String(b.last_at).localeCompare(String(a.last_at)));
   subLine(rows.length);
   renderHeaderStats();
 
