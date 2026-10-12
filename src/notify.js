@@ -94,10 +94,24 @@ export async function notifyNewLead(convId, firstText = '', media = []) {
     `🆕 Новая заявка${c.prev_deal_id ? ' (повторный клиент)' : ''} — ${c.name || 'клиент'}, +${c.phone}`,
     `Источник: ${src}`,
     what ? `Пишет: ${what}` : '',
-    getManager(c.manager_id) ? `Ответственный: ${getManager(c.manager_id).name}` : '',
+    getManager(c.manager_id) ? `Ведёт: ${getManager(c.manager_id).name}`
+      : getManager(c.offered_to) ? `Предложена: ${getManager(c.offered_to).name} — взять в работу до ${localTime(c.offer_due_at)}`
+      : 'В общем списке — кто первый возьмёт в работу, тот и ведёт',
     'Бот уже отвечает.',
     adminLink(convId)
   ].filter(Boolean).join('\n'), { owners: true });
+}
+
+/** Написать на конкретные номера — для уведомлений очереди. */
+export async function sendToPhones(phones, text) {
+  if (getSetting('notify_on') !== '1') return;
+  for (const phone of phones.filter(Boolean)) {
+    try { await channel.send({ phone, chat_id: null, channel: channel.name }, text); }
+    catch (e) {
+      console.error('уведомление менеджеру не ушло:', e.message);
+      logFailure('notify', { target: phone, payload: { text }, error: e.message, retry: true });
+    }
+  }
 }
 
 export const adminLink = (convId) => (adminUrl() ? `${adminUrl()}/?conv=${convId}` : '');

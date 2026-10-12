@@ -117,7 +117,7 @@ export function setNext(convId, b, actor = actorName('менеджер')) {
 
   if (b.done || b.clear) {
     db.prepare(`UPDATE conversations SET next_action=NULL, next_action_at=NULL, next_action_mgr=NULL,
-      next_action_notified_at=NULL, followup_at=NULL, followup_note=NULL, followup_who=NULL WHERE id=?`).run(convId);
+      next_action_notified_at=NULL, followup_at=NULL, followup_note=NULL, followup_who=NULL, open_at=NULL WHERE id=?`).run(convId);
     audit('lead', convId, 'next_action', was, null, actor, b.done ? 'выполнено' : 'убрано');
     return;
   }
@@ -137,7 +137,7 @@ export function setNext(convId, b, actor = actorName('менеджер')) {
   const mgr = Number(b.who) || c.manager_id || null;
   if (mgr && !getManager(mgr)) throw new Error('Нет такого менеджера');
   db.prepare(`UPDATE conversations SET next_action=?, next_action_at=?, next_action_mgr=?, next_action_notified_at=NULL,
-    followup_at=NULL, followup_note=NULL, followup_who=NULL WHERE id=?`).run(what, sqlTime(at), mgr, convId);
+    followup_at=NULL, followup_note=NULL, followup_who=NULL, open_at=NULL WHERE id=?`).run(what, sqlTime(at), mgr, convId);
   audit('lead', convId, 'next_action', was, `${what} · ${sqlTime(at)}${mgr ? ' · ' + getManager(mgr).name : ''}`, actor);
 }
 

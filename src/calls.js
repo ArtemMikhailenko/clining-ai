@@ -12,7 +12,6 @@ import path from 'node:path';
 import { db, getSetting, audit, logAccess } from './db.js';
 import { actorName } from './context.js';
 import { nextWorkStart } from './schedule.js';
-import { SERVICES } from './leadnorm.js';
 
 export const CALL_STATUS = {
   answered: 'дозвонился', no_answer: 'не ответил', busy: 'занято / сбросил',
@@ -34,14 +33,15 @@ const parseTime = (s) => (s ? new Date(String(s).replace(' ', 'T') + (/[zZ]|[+-]
 
 // хэш пароля наружу не отдаём никогда — только признак, что вход заведён
 export const listManagers = () =>
-  db.prepare(`SELECT id, name, phone, role, active, created_at, login, last_login_at, langs, services, last_lead_at,
+  db.prepare(`SELECT id, name, phone, role, active, created_at, login, last_login_at, langs, daily_quota, sort,
       (pass IS NOT NULL AND pass != '') AS can_login
-    FROM managers ORDER BY role = 'owner' DESC, id`).all();
-export const getManager = (id) => (id ? db.prepare(`SELECT id, name, phone, role, active, login, last_login_at, langs, services,
+    FROM managers ORDER BY sort, id`).all();
+export const getManager = (id) => (id ? db.prepare(`SELECT id, name, phone, role, active, login, last_login_at, langs, daily_quota, sort,
     (pass IS NOT NULL AND pass != '') AS can_login FROM managers WHERE id=?`).get(id) : null);
 
-// языки, которые можно закрепить за менеджером
-export const LANGS = { he: 'иврит', ru: 'русский', en: 'английский', uk: 'украинский' };
+// Языки очереди. Украинский идёт к тем, кто говорит по-русски
+export const LANGS = { ru: 'русский', he: 'иврит' };
+export const langGroup = (lang) => (lang === 'uk' ? 'ru' : LANGS[lang] ? lang : null);
 const listOf = (v) => (Array.isArray(v) ? v : String(v || '').split(',')).map((x) => String(x).trim()).filter(Boolean);
 const keepKnown = (v, known) => [...new Set(listOf(v).filter((x) => known.includes(x)))].join(',');
 export const cleanPhone = (v) => String(v || '').replace(/\D/g, '');
@@ -55,7 +55,8 @@ export function saveManager(m) {
   const active = m.active === false || m.active === 0 ? 0 : 1;
   const login = String(m.login ?? '').trim() || null;
   const langs = keepKnown(m.langs, Object.keys(LANGS));
-  const services = keepKnown(m.services, SERVICES);
+  const quota = Math.max(0, Math.min(500, Math.round(Number(m.daily_quota) || 0)));
+  const sort = Number.isFinite(Number(m.sort)) ? Math.round(Number(m.sort)) : null;
   if (login && !/^[\w.@-]{3,40}$/.test(login)) throw new Error('Логин — латиница, цифры, точка или дефис, от 3 символов');
   if (login) {
     const taken = db.prepare('SELECT id FROM managers WHERE lower(login)=lower(?) AND id != ?').get(login, m.id || 0);
@@ -63,14 +64,15 @@ export function saveManager(m) {
   }
   const before = m.id ? getManager(m.id) : null;
   if (m.id) {
-    db.prepare('UPDATE managers SET name=?, phone=?, role=?, active=?, login=?, langs=?, services=? WHERE id=?')
-      .run(name, phone || null, role, active, login, langs, services, m.id);
+    db.prepare('UPDATE managers SET name=?, phone=?, role=?, active=?, login=?, langs=?, daily_quota=?, sort=COALESCE(?, sort) WHERE id=?')
+      .run(name, phone || null, role, active, login, langs, quota, sort, m.id);
   } else {
-    m.id = Number(db.prepare('INSERT INTO managers(name, phone, role, active, login, langs, services) VALUES(?,?,?,?,?,?,?)')
-      .run(name, phone || null, role, active, login, langs, services).lastInsertRowid);
+    m.id = Number(db.prepare(`INSERT INTO managers(name, phone, role, active, login, langs, daily_quota, sort)
+      VALUES(?,?,?,?,?,?,?, COALESCE(?, (SELECT COALESCE(max(sort), 0) + 1 FROM managers)))`)
+      .run(name, phone || null, role, active, login, langs, quota, sort).lastInsertRowid);
   }
   if ((before?.langs ?? '') !== langs) audit('manager', m.id, 'langs', before?.langs || null, langs || null, actorName('система'));
-  if ((before?.services ?? '') !== services) audit('manager', m.id, 'services', before?.services || null, services || null, actorName('система'));
+  if ((before?.daily_quota ?? 0) !== quota) audit('manager', m.id, 'daily_quota', before?.daily_quota ?? null, quota, actorName('система'));
   // права и вход — то, что владелец потом захочет восстановить по журналу
   if (before?.role !== role) audit('manager', m.id, 'role', before?.role ?? null, role, actorName('система'));
   if ((before?.login ?? null) !== login) audit('manager', m.id, 'login', before?.login ?? null, login, actorName('система'));
@@ -85,81 +87,12 @@ export function deleteManager(id) {
 }
 
 /**
- * Кому дать заявку. Из тех, кто принимает заявки, — подходящие по языку клиента
- * и услуге; профильные раньше тех, у кого правила не заданы. Среди равных —
- * по очереди: тому, кто дольше всех не получал новую. Если по правилам не
- * подходит никто, заявку всё равно получает кто-то из принимающих:
- * ничья заявка — это и есть потерянная заявка.
+ * Номера для рассылки: ответственный; нет его — тот, кому заявка предложена;
+ * нет и такого — все, кто принимает заявки (заявка в общем списке).
  */
-export function pickManager(conv = null, { exclude = [] } = {}) {
-  let lead = {};
-  try { lead = JSON.parse(conv?.lead || '{}'); } catch {}
-  const all = db.prepare(`SELECT m.*, (SELECT count(*) FROM conversations c
-      WHERE c.manager_id = m.id AND c.call_due_at IS NOT NULL AND c.status != 'closed' AND c.deleted_at IS NULL) AS load
-    FROM managers m WHERE m.active = 1`).all().filter((m) => !exclude.includes(m.id));
-  // -1 — не подходит; иначе сколько правил совпало явно. Профильный менеджер
-  // идёт первым: кто ничего не отметил, берёт остальное и подстраховывает
-  const score = (m) => {
-    let n = 0;
-    for (const [rule, v] of [[m.langs, conv?.lang], [m.services, lead.service]]) {
-      if (!rule || !v) continue;
-      if (!listOf(rule).includes(v)) return -1;
-      n++;
-    }
-    return n;
-  };
-  const best = Math.max(-1, ...all.map(score));
-  const pool = best >= 0 ? all.filter((m) => score(m) === best) : all;
-  pool.sort((a, b) => (a.last_lead_at || '').localeCompare(b.last_lead_at || '') || a.load - b.load || a.id - b.id);
-  return pool[0] || null;
-}
-
-/** Назначить ответственного автоматически и отметить очередь. */
-function giveTo(convId, m, actor, why, from = null) {
-  db.prepare("UPDATE conversations SET manager_id=?, assigned_at=datetime('now') WHERE id=?").run(m.id, convId);
-  db.prepare("UPDATE managers SET last_lead_at=datetime('now') WHERE id=?").run(m.id);
-  audit('lead', convId, 'manager_id', from, m.name, actor, why);
-}
-
-/**
- * Новая заявка: ответственный появляется сразу, а не когда бот позовёт человека.
- * Повторный клиент остаётся у своего менеджера, если тот принимает заявки.
- */
-export function assignNewLead(convId) {
-  if (getSetting('assign_new') === '0') return null;
-  const conv = db.prepare('SELECT * FROM conversations WHERE id=?').get(convId);
-  if (!conv || conv.status === 'closed') return null;
-  const keep = getManager(conv.manager_id);
-  if (keep?.active) return keep;
-  const m = pickManager(conv);
-  if (m) giveTo(convId, m, 'система', keep ? `${keep.name} не принимает заявки` : 'новая заявка', keep?.name ?? null);
-  return m;
-}
-
-/**
- * Звонок просрочен — заявку забираем и отдаём следующему подходящему.
- * Один раз на заявку: дальше решает владелец, иначе заявка ходила бы по кругу.
- * Если менеджер уже писал клиенту после назначения — он работает, не забираем.
- */
-export function reassignOverdue(conv) {
-  if (getSetting('reassign_on') === '0' || (conv.reassigns || 0) >= 1 || !conv.manager_id) return null;
-  const wrote = db.prepare(`SELECT 1 FROM messages WHERE conv_id=? AND direction='out' AND author='human'
-    AND created_at >= COALESCE(?, '') LIMIT 1`).get(conv.id, conv.assigned_at);
-  if (wrote) return null;
-  const prev = getManager(conv.manager_id);
-  const m = pickManager(conv, { exclude: [conv.manager_id] });
-  if (!m) return null;
-  giveTo(conv.id, m, 'система', `не позвонил вовремя: ${prev?.name || '—'}`, prev?.name ?? null);
-  const due = sqlTime(callDue());
-  db.prepare('UPDATE conversations SET call_due_at=?, call_escalated_at=NULL, reassigns=reassigns+1 WHERE id=?').run(due, conv.id);
-  audit('lead', conv.id, 'call_due_at', conv.call_due_at, due, 'система', 'новый срок после передачи');
-  return { from: prev, to: m, due };
-}
-
-/** Номера для рассылки: ответственный, а если его нет — все, кто принимает заявки. */
 export function recipients(convId, { owners = false, managerId = null } = {}) {
-  const conv = convId ? db.prepare('SELECT manager_id FROM conversations WHERE id=?').get(convId) : null;
-  const mine = getManager(managerId || conv?.manager_id);
+  const conv = convId ? db.prepare('SELECT manager_id, offered_to FROM conversations WHERE id=?').get(convId) : null;
+  const mine = getManager(managerId || conv?.manager_id || conv?.offered_to);
   const base = mine?.phone ? [mine] : db.prepare("SELECT phone FROM managers WHERE active=1 AND phone IS NOT NULL AND phone != ''").all();
   const extra = owners ? db.prepare("SELECT phone FROM managers WHERE role='owner' AND phone IS NOT NULL AND phone != ''").all() : [];
   return [...new Set([...base, ...extra].map((m) => m.phone).filter(Boolean))];
@@ -181,17 +114,13 @@ export function assignHandoff(convId, { actor = 'система', why = '' } = {
   if (!conv || conv.status === 'closed') return null;
   if (conv.call_due_at) return getManager(conv.manager_id);
 
-  const keep = getManager(conv.manager_id);
-  const m = keep || pickManager(conv);
+  // ответственного здесь не назначаем: его выбирает очередь (queue.js),
+  // а ответственным менеджер становится, когда сам возьмёт заявку в работу
   const due = sqlTime(callDue());
-  db.prepare(`UPDATE conversations SET manager_id=?, assigned_at=datetime('now'), call_due_at=?, handoff_due_at=?,
-    call_escalated_at=NULL WHERE id=?`).run(m?.id ?? null, due, due, convId);
-  if (!keep && m) {
-    db.prepare("UPDATE managers SET last_lead_at=datetime('now') WHERE id=?").run(m.id);
-    audit('lead', convId, 'manager_id', null, m.name, actor, why || 'передача менеджеру');
-  }
+  db.prepare(`UPDATE conversations SET assigned_at=datetime('now'), call_due_at=?, handoff_due_at=?,
+    call_escalated_at=NULL WHERE id=?`).run(due, due, convId);
   audit('lead', convId, 'call_due_at', null, due, actor, why || 'передача менеджеру');
-  return m;
+  return getManager(conv.manager_id);
 }
 
 export function setManager(convId, managerId, actor = actorName('менеджер')) {
@@ -199,8 +128,13 @@ export function setManager(convId, managerId, actor = actorName('менедже�
   if (!conv) throw new Error('Нет такой заявки');
   const m = managerId ? getManager(managerId) : null;
   if (managerId && !m) throw new Error('Нет такого менеджера');
-  db.prepare('UPDATE conversations SET manager_id=?, assigned_at=COALESCE(assigned_at, datetime(\'now\')) WHERE id=?')
-    .run(m?.id ?? null, convId);
+  // владелец назначает сам: это сразу «в работе», без очереди и часа на раздумья
+  db.prepare(`UPDATE conversations SET manager_id=?, assigned_at=COALESCE(assigned_at, datetime('now')),
+    taken_at=CASE WHEN ? IS NULL THEN NULL ELSE datetime('now') END, offered_to=NULL, offer_due_at=NULL, open_at=NULL WHERE id=?`)
+    .run(m?.id ?? null, m?.id ?? null, convId);
+  const log = db.prepare('INSERT INTO assign_log(conv_id, manager_id, kind, note) VALUES (?,?,?,?)');
+  if (m && m.id !== conv.manager_id) log.run(convId, m.id, 'taken', 'назначил владелец');
+  if (conv.manager_id && conv.manager_id !== m?.id) log.run(convId, conv.manager_id, 'moved', m ? `передал владелец: ${m.name}` : 'снят владельцем');
   audit('lead', convId, 'manager_id', getManager(conv.manager_id)?.name ?? null, m?.name ?? null, actor);
 }
 
@@ -286,7 +220,8 @@ export function logCall(convId, b, actor = actorName('менеджер')) {
 
   // следующий звонок становится новым сроком; иначе звонить больше не нужно
   const due = next ? sqlTime(next) : null;
-  db.prepare('UPDATE conversations SET call_due_at=?, call_escalated_at=NULL, manager_id=COALESCE(manager_id, ?) WHERE id=?')
+  // звонок записан — просрочки больше нет, карточка снова только у ответственного
+  db.prepare('UPDATE conversations SET call_due_at=?, call_escalated_at=NULL, open_at=NULL, manager_id=COALESCE(manager_id, ?) WHERE id=?')
     .run(due, managerId, convId);
   audit('lead', convId, 'call', null, CALL_STATUS[status], actor, String(b.outcome || '').trim() || null);
   if (due !== conv.call_due_at) audit('lead', convId, 'call_due_at', conv.call_due_at, due, actor, 'после звонка');

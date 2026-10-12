@@ -7,7 +7,8 @@ import fs from 'node:fs';
 import { withinWorkHours, scheduleSetting, sweepStale, workHours, isHoliday } from './schedule.js';
 import { quote } from './pricing.js';
 import { notifyHandoff, notifyNewLead } from './notify.js';
-import { assignHandoff, assignNewLead } from './calls.js';
+import { assignHandoff } from './calls.js';
+import { offerLead } from './queue.js';
 import { logFailure } from './integrations.js';
 import { amountOf } from './stages.js';
 import { transcribe, sttConfigured } from './stt.js';
@@ -143,7 +144,8 @@ function flagHuman(convId, reason) {
   // показывает «Перехватить», и вернуть ИИ нечем
   db.prepare("UPDATE conversations SET needs_human=1, handoff_reason=?, status='human', ai_enabled=0 WHERE id=?")
     .run(reason, convId);
-  assignHandoff(convId, { actor: 'бот', why: reason });   // ответственный и срок звонка (ТЗ §2.2)
+  assignHandoff(convId, { actor: 'бот', why: reason });   // срок звонка (ТЗ §2.2)
+  offerLead(convId, 'бот передал менеджеру');              // ничья заявка — предлагаем по очереди
   notifyHandoff(convId, reason);            // менеджер должен узнать сразу, а не из админки
 }
 
@@ -256,7 +258,9 @@ async function processIncoming({ phone, name, text, wa_id, chat_id = null, media
   const lang = dominantLang(history(conv.id, 12));
   if (lang) db.prepare('UPDATE conversations SET lang=? WHERE id=?').run(lang, conv.id);
   if (isNewLead) {
-    assignNewLead(conv.id);   // уведомление уйдёт уже ответственному, а не всем подряд
+    // сначала очередь: уведомление уйдёт тому, кому предложили, и владельцу,
+    // а если очередь пуста — всем (заявка в общем списке)
+    await offerLead(conv.id, 'новая заявка').catch((e) => console.error('очередь заявок:', e.message));
     notifyNewLead(conv.id, body, media).catch((e) => console.error('уведомление о новой заявке:', e.message));
   }
 

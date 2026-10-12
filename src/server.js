@@ -26,12 +26,12 @@ import { listPayments, addPayment, deletePayment, listWorks, syncWorkDate, workD
 import { syncMeta, metaStatus, startMeta, accountId as metaAccount } from './meta.js';
 import { ATTR_TITLE, PLATFORM_TITLE } from './attribution.js';
 import { localDate } from './schedule.js';
-import { SERVICES } from './leadnorm.js';
 import { syncCalendar, calendarStatus, startCalendar, doneExternal } from './gcal.js';
 import { calendarEvents } from './calendar.js';
 import { listManagers, saveManager, deleteManager, getManager, setManager, assignHandoff, clearCallDue,
   listCalls, logCall, saveRecording, sweepRecordings, overdueCalls, CALL_STATUS, recordingFile, deleteRecording,
-  restoreRecording, purgeTrash, reassignOverdue, LANGS } from './calls.js';
+  restoreRecording, purgeTrash, LANGS } from './calls.js';
+import { takeLead, startQueue, teamStats } from './queue.js';
 import { aiConfigured, aiLabel } from './ai.js';
 
 /* ─────────── Процесс не должен умирать молча ───────────
@@ -78,7 +78,7 @@ const OWNER_ONLY = [
   ['*', /^\/api\/maintenance\//], ['POST', /^\/api\/wa\/(pair|logout|restart)$/], ['POST', /^\/api\/sim\//],
   ['GET', /^\/api\/logs\//], ['POST', /^\/api\/logs\//], ['POST', /^\/api\/conversations\/\d+\/(delete|restore)$/],
   ['GET', /^\/api\/conversations\/deleted$/], ['*', /^\/api\/calls\/\d+\/recording/],
-  ['*', /^\/api\/report/], ['*', /^\/api\/meta\//], ['*', /^\/api\/spend/], ['*', /^\/api\/gcal\//]
+  ['*', /^\/api\/report/], ['*', /^\/api\/meta\//], ['*', /^\/api\/spend/], ['*', /^\/api\/gcal\//], ['GET', /^\/api\/team-stats/]
 ];
 const CONV_WRITE = /^\/api\/conversations\/(\d+)\/(lead|note|send|mode|stage|flag|reviewed|next|calls|status|payments|payments\/\d+\/delete|works\/\d+\/\w+|new-deal)$/;
 
@@ -93,9 +93,12 @@ app.use((req, res, next) => {
   const w = req.method === 'POST' && CONV_WRITE.exec(req.path);
   if (w) {
     const conv = getConversation(Number(w[1]));
-    if (conv?.manager_id && conv.manager_id !== u.id) {
-      const who = getManager(conv.manager_id)?.name || 'другой менеджер';
-      return res.status(403).json({ error: `Заявку ведёт ${who}. Чтобы работать с ней, нажмите «Взять себе»`, take: true });
+    // менять заявку может только тот, кто взял её в работу
+    if (conv && conv.manager_id !== u.id) {
+      const who = getManager(conv.manager_id)?.name;
+      return res.status(403).json({ take: true, error: !conv.manager_id ? 'Сначала нажмите «Взять в работу»'
+        : conv.open_at ? `Заявку ведёт ${who}, но она просрочена — нажмите «Взять в работу», чтобы забрать её`
+        : `Заявку ведёт ${who}. Смотреть можно, менять — только ему` });
     }
     // оплаченная сделка — итог для отчётов: исправляет её только владелец
     if (conv?.close_reason === 'paid' && (['lead', 'stage', 'payments'].includes(w[2]) || /^(payments|works)\//.test(w[2]))) {
@@ -197,13 +200,13 @@ app.get('/api/state', (req, res) => {
     offer_wait_hours: Number(getSetting('offer_wait_hours')) || 48,
     media_wait_hours: Number(getSetting('media_wait_hours')) || 24,
     evening_report: getSetting('evening_report') === '1',
-    assign_new: getSetting('assign_new') !== '0',
+    offer_minutes: Number(getSetting('offer_minutes')) || 60,
+    open_after_hours: Number(getSetting('open_after_hours')) || 5,
     gcal_on: getSetting('gcal_on') === '1',
     gcal_jobs_id: getSetting('gcal_jobs_id') || '',
     gcal_tasks_id: getSetting('gcal_tasks_id') || '',
     gcal_job_hours: Number(getSetting('gcal_job_hours')) || 3,
-    reassign_on: getSetting('reassign_on') !== '0',
-    langs: LANGS, services: SERVICES,
+    langs: LANGS,
     managers: listManagers(),
     me: req.user,
     me_auth: authEnabled(),
@@ -260,11 +263,11 @@ app.post('/api/state', (req, res) => {
   if ('source_map' in req.body) setSetting('source_map', String(req.body.source_map));
   if ('media_required' in req.body) setSetting('media_required', String(req.body.media_required));
   if ('evening_report' in req.body) setSetting('evening_report', req.body.evening_report ? '1' : '0');
-  if ('assign_new' in req.body) setSetting('assign_new', req.body.assign_new ? '1' : '0');
+  if ('offer_minutes' in req.body) setSetting('offer_minutes', String(Math.min(480, Math.max(5, Math.round(Number(req.body.offer_minutes) || 60)))));
+  if ('open_after_hours' in req.body) setSetting('open_after_hours', String(Math.min(72, Math.max(1, Math.round(Number(req.body.open_after_hours) || 5)))));
   if ('gcal_on' in req.body) setSetting('gcal_on', req.body.gcal_on ? '1' : '0');
   for (const k of ['gcal_jobs_id', 'gcal_tasks_id']) if (k in req.body) setSetting(k, String(req.body[k] || '').trim());
   if ('gcal_job_hours' in req.body) setSetting('gcal_job_hours', String(Math.min(12, Math.max(1, Number(req.body.gcal_job_hours) || 3))));
-  if ('reassign_on' in req.body) setSetting('reassign_on', req.body.reassign_on ? '1' : '0');
   if ('repeat_after_days' in req.body) setSetting('repeat_after_days', String(Math.min(90, Math.max(1, Number(req.body.repeat_after_days) || 3))));
   if ('amounts_with_vat' in req.body) setSetting('amounts_with_vat', req.body.amounts_with_vat ? '1' : '0');
   if ('vat_rate' in req.body) setSetting('vat_rate', String(Math.min(30, Math.max(0, Number(req.body.vat_rate) || 0))));
@@ -587,6 +590,13 @@ app.get('/api/sources', (req, res) => {
 
 /** Заказы с назначенной датой — для календаря. */
 app.get('/api/holidays', (req, res) => res.json(holidays()));
+/* Статистика по менеджерам: получил, взял, не взял вовремя, передал, оплачено */
+app.get('/api/team-stats', (req, res) => {
+  const d = (v) => (/^\d{4}-\d{2}-\d{2}$/.test(String(v || '')) ? String(v) : null);
+  const to = d(req.query.to) || localDate();
+  const from = d(req.query.from) || to;
+  res.json(teamStats(from, to));
+});
 /* Календарь CRM: все события периода одним запросом */
 app.get('/api/calendar', (req, res) => {
   const d = (v) => (/^\d{4}-\d{2}-\d{2}$/.test(String(v || '')) ? String(v) : null);
@@ -927,13 +937,12 @@ app.post('/api/conversations/:id/manager', (req, res) => {
   const id = Number(req.params.id);
   const to = Number(req.body.manager_id) || null;
   const u = req.user;
-  // менеджер может взять заявку себе; передать другому — только свою или ничью
-  if (u?.role !== 'owner') {
-    const cur = getConversation(id)?.manager_id;
-    if (to !== u.id && cur && cur !== u.id) return res.status(403).json({ error: 'Передать чужую заявку может её менеджер или владелец' });
-  }
-  try { setManager(id, to); }
-  catch (e) { return res.status(400).json({ error: e.message }); }
+  try {
+    // владелец назначает кого угодно; менеджер только берёт в работу себе — по правилам очереди
+    if (!u || u.role === 'owner') setManager(id, to);
+    else if (to === u.id) takeLead(id, u);
+    else return res.status(403).json({ error: 'Назначить другого может только владелец' });
+  } catch (e) { return res.status(400).json({ error: e.message }); }
   emit('conversations', null);
   res.json(getConversation(id));
 });
@@ -1111,17 +1120,6 @@ setInterval(async () => {
   for (const c of overdueCalls()) {
     let l = {};
     try { l = JSON.parse(c.lead || '{}'); } catch {}
-    // сначала пробуем отдать заявку другому: пока ответственный молчит, клиент остывает
-    const moved = reassignOverdue(c);
-    if (moved) {
-      const who = `${l.name || c.name || 'клиент'}, +${c.phone}`;
-      await notifyManagers(`🔁 Заявка передана вам: ${who}\n${moved.from?.name || 'Ответственный'} не позвонил вовремя.`
-        + ` Позвоните до ${localTime(moved.due)}\n${adminLink(c.id)}`, { managerId: moved.to.id, owners: true }).catch(() => {});
-      if (moved.from?.phone) await notifyManagers(`Заявку ${who} передали ${moved.to.name}: звонок был просрочен.`,
-        { managerId: moved.from.id }).catch(() => {});
-      emit('conversations', null);
-      continue;
-    }
     db.prepare("UPDATE conversations SET call_escalated_at=datetime('now') WHERE id=?").run(c.id);
     const m = getManager(c.manager_id);
     await notifyManagers(`⏰ Просрочен звонок: ${l.name || c.name || 'клиент'}, +${c.phone}`
@@ -1134,6 +1132,7 @@ setInterval(() => { sweepRecordings(); purgeTrash(); }, 36e5).unref?.();
 startRetries();
 startMeta();
 startCalendar();
+startQueue();
 startControl();
 
 app.listen(PORT, async () => {

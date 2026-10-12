@@ -199,9 +199,33 @@ function paint(box, html) {
   }
 }
 
+/* ───── кто ведёт заявку ─────
+   Ответственный — тот, кто нажал «Взять в работу». До этого заявка либо
+   предложена менеджеру из очереди (у него час), либо лежит в общем списке. */
+const offerLeft = (c) => c.offered_to && c.offer_due_at && dt(c.offer_due_at) > Date.now();
+function ownerChip(c) {
+  if (c.manager_id) {
+    const mine = c.manager_id === me().id;
+    return `<span class="chip own ${mine ? 'me' : ''}">${mine ? 'Вы ведёте' : 'Ведёт: ' + esc(mgrName(c.manager_id) || '—')}</span>`
+      + (c.open_at ? '<span class="chip late" title="Задача просрочена — заявку может взять любой">открыта всем</span>' : '');
+  }
+  if (offerLeft(c)) return `<span class="chip offer" title="Если не возьмёт в работу до этого времени — заявка уйдёт следующему">Предложена: ${esc(mgrName(c.offered_to) || '—')} · до ${hhmm(c.offer_due_at)}</span>`;
+  return '<span class="chip free">Свободная — можно взять</span>';
+}
+/** Может ли текущий пользователь нажать «Взять в работу». */
+function canTake(c) {
+  const u = me();
+  if (!u.id || c.status === 'closed' || c.manager_id === u.id) return false;
+  if (u.role === 'owner') return true;
+  if (c.manager_id) return Boolean(c.open_at);
+  return !offerLeft(c) || c.offered_to === u.id;
+}
+/** Менять заявку может только тот, кто её ведёт (и владелец). */
+const canEdit = (c) => me().role === 'owner' || (me().id && c.manager_id === me().id);
+
 function chipFor(c) {
   if (c.status === 'closed') return '<span class="chip closed">в архиве</span>';
-  const chips = [];
+  const chips = [ownerChip(c)];
   if (c.needs_human) chips.push('<span class="chip need">нужен менеджер</span>');
   else chips.push(c.ai_enabled ? '<span class="chip ai">ИИ ведёт</span>' : '<span class="chip human">менеджер</span>');
   const cs = callState(c);
@@ -450,6 +474,32 @@ function hbars(rows, color) {
     <span class="v">${v}</span></div>`).join('');
 }
 
+/* ───── статистика менеджеров ───── */
+let teamPer = 'today';
+async function loadTeamStats() {
+  const box = $('#team-stats');
+  if (!box) return;
+  const to = iso(new Date());
+  const d = new Date(); d.setDate(d.getDate() - (teamPer === 'week' ? 6 : teamPer === 'month' ? 29 : 0));
+  try {
+    const r = await api(`/api/team-stats?from=${iso(d)}&to=${to}`);
+    const rows = r.rows.filter((m) => m.offered || m.taken || m.in_work || m.daily_quota);
+    const n = (v, cls = '') => `<td class="num ${v ? cls : 'zero'}">${v || '—'}</td>`;
+    box.innerHTML = rows.length ? `<div class="tbl-wrap"><table class="team-tbl"><thead><tr>
+        <th>Менеджер</th><th class="num" title="Предложено очередью">Получил</th><th class="num" title="Нажал «Взять в работу»">Взял</th>
+        <th class="num" title="Не взял за отведённое время — заявка ушла дальше">Не взял</th>
+        <th class="num" title="Взял, но просрочил задачу, и клиента забрал другой">Передал</th>
+        <th class="num" title="Сейчас в работе">В работе</th><th class="num">Согласовано</th><th class="num">Оплачено</th>
+        <th class="num" title="Оплачено из взятых за период">% закрытия</th></tr></thead><tbody>
+      ${rows.map((m) => `<tr class="${m.active ? '' : 'off'}"><td><b>${esc(m.name)}</b>${m.daily_quota ? `<small>${m.daily_quota} в день</small>` : ''}</td>
+        ${n(m.offered)}${n(m.taken, 'good')}${n(m.expired, 'bad')}${n(m.lost, 'bad')}${n(m.in_work)}${n(m.agreed)}
+        <td class="num ${m.paid ? 'good' : 'zero'}">${m.paid || '—'}${m.revenue ? `<small>${m.revenue.toLocaleString('ru-RU')} ₪</small>` : ''}</td>
+        <td class="num">${m.close_rate == null ? '—' : m.close_rate + '%'}</td></tr>`).join('')}
+      </tbody></table></div>${r.pool ? `<div class="team-pool">В общий список ушло заявок: <b>${r.pool}</b> — нормы в очереди были выбраны</div>` : ''}`
+      : '<div class="muted">Пока пусто: задайте менеджерам норму «в день» в настройках.</div>';
+  } catch (e) { box.textContent = e.message; }
+}
+
 function renderDash() {
   const el = $('#dash');
   if (!stats) {
@@ -516,7 +566,20 @@ function renderDash() {
       <div class="panel"><div class="ph"><div><h3>Типы уборки</h3><div class="s">по всем заявкам периода</div></div></div>${hbars(s.by_service, 'var(--s1)')}</div>
       <div class="panel"><div class="ph"><div><h3>Районы</h3><div class="s">откуда пишут клиенты</div></div></div>${hbars(s.by_district, 'var(--accent)')}</div>
       <div class="panel"><div class="ph"><div><h3>Источники</h3><div class="s">с какой рекламы пришёл клиент</div></div></div>${hbars(s.by_source || [], 'var(--s4)')}</div>
-    </div>`;
+    </div>
+    ${isOwner() ? `<div class="panel team-panel"><div class="ph"><div><h3>Менеджеры</h3>
+      <div class="s">сколько заявок получил из очереди, сколько взял в работу, сколько упустил и закрыл</div></div>
+      <div class="seg" id="team-per">${[['today', 'Сегодня'], ['week', '7 дней'], ['month', 'Месяц']].map(([k, t]) =>
+        `<button data-p="${k}" class="${teamPer === k ? 'on' : ''}">${t}</button>`).join('')}</div></div>
+      <div id="team-stats" class="team-stats">загружаем…</div></div>` : ''}`;
+  if (isOwner()) {
+    $$('#team-per button').forEach((b) => b.onclick = () => {
+      teamPer = b.dataset.p;
+      $$('#team-per button').forEach((x) => x.classList.toggle('on', x === b));
+      loadTeamStats();
+    });
+    loadTeamStats();
+  }
 
   // ближайшие заказы: сводка должна отвечать и на вопрос «что сегодня делать»
   api('/api/schedule').then((rows) => {
@@ -933,7 +996,7 @@ function cardHtml(c) {
     ${facts ? `<div class="facts">${facts}</div>` : ''}
     ${thumbs ? `<div class="card-thumbs">${thumbs}</div>` : ''}
     <div class="card-snip" dir="auto">${esc(c.summary || c.last_body || '')}</div>
-    <div class="card-foot">${chipFor(c)}${waitHtml(c)}${c.manager_id ? `<span class="card-mgr" title="Ответственный">${esc(mgrName(c.manager_id))}</span>` : ''}</div>
+    <div class="card-foot">${chipFor(c)}${waitHtml(c)}</div>
   </div>`;
 }
 
@@ -1110,7 +1173,8 @@ function rowHtml(c) {
         ${l.price_quote ? `<span class="lp">${esc(l.price_quote)}</span>` : ''}
         <span class="t">${ago(c.last_at)}</span>
       </div>
-      <div class="lsum" dir="auto">${esc(c.summary || c.last_body || '')}</div>
+      <div class="lsum"><span class="lown ${c.manager_id ? (c.manager_id === me().id ? 'me' : 'own') : offerLeft(c) ? 'offer' : 'free'}">${
+        c.manager_id ? (c.manager_id === me().id ? 'вы' : esc(mgrName(c.manager_id))) : offerLeft(c) ? '→ ' + esc(mgrName(c.offered_to)) : 'свободна'}</span><bdi>${esc(c.summary || c.last_body || '')}</bdi></div>
     </div>
   </div>`;
 }
@@ -1177,6 +1241,7 @@ function chatHtml(c) {
       <div class="ava lg">${esc(initials(c.name, c.phone))}</div>
       <div class="t"><b dir="auto">${esc(c.name || 'Без имени')}</b><span>+${esc(c.phone)}</span></div>
       <div class="grow"></div>
+      ${canTake(c) ? '<button class="btn primary" data-a="take">Взять в работу</button>' : ''}
       ${c.ai_enabled ? '<button class="btn warn" data-a="takeover">Перехватить</button>'
                      : '<button class="btn primary" data-a="giveback">Вернуть ИИ</button>'}
       <button class="btn" data-a="card">Карточка</button>
@@ -1186,7 +1251,7 @@ function chatHtml(c) {
     ${c.needs_human ? `<div class="alert">⚠ ${esc(c.handoff_reason || 'ИИ просит подключиться')}</div>` : ''}
     <div class="scroll" data-r="wrap"><div class="thread" data-r="thread"></div></div>
     <div class="composer"><div class="composer-box">
-      <textarea data-r="inp" dir="auto" rows="1" placeholder="Написать клиенту…"></textarea>
+      <textarea data-r="inp" dir="auto" rows="1" ${canEdit(c) ? 'placeholder="Написать клиенту…"' : `disabled placeholder="${c.manager_id ? 'Заявку ведёт ' + esc(mgrName(c.manager_id)) + ' — писать клиенту может только он' : 'Чтобы писать клиенту, нажмите «Взять в работу»'}"`}></textarea>
       <div class="composer-side">
         <label class="switch"><input type="checkbox" data-r="keep"><span>не выключать ИИ</span></label>
         <div style="display:flex;gap:7px">
@@ -1223,6 +1288,7 @@ function bindChat(root) {
   const wrap = q('[data-r="wrap"]'); wrap.scrollTop = wrap.scrollHeight;
   $$('img', root).forEach((i) => i.onclick = () => window.open(i.src, '_blank'));
   q('[data-a="takeover"]') && (q('[data-a="takeover"]').onclick = () => setMode(false));
+  q('[data-a="take"]') && (q('[data-a="take"]').onclick = () => takeConv(c.id));
   q('[data-a="giveback"]') && (q('[data-a="giveback"]').onclick = () => setMode(true));
   // В архиве три корзины, и выбирать её должен человек: свои сотрудники,
   // живой лид «не сейчас» и настоящий отказ — это разные вещи.
@@ -1294,6 +1360,14 @@ function bindChat(root) {
     b.disabled = false; b.textContent = 'Подсказать';
   };
   inp.focus();
+}
+async function takeConv(id) {
+  try {
+    await api(`/api/conversations/${id}/manager`, { method: 'POST', body: JSON.stringify({ manager_id: me().id }) });
+    toast('Заявка в работе — ведёте вы');
+    loadList();
+    openConv(id, drawerOpen);
+  } catch (e) { toast(e.message, true); }
 }
 async function setMode(ai) {
   await api(`/api/conversations/${current}/mode`, { method: 'POST', body: JSON.stringify({ ai_enabled: ai }) });
@@ -1616,14 +1690,19 @@ function sourceHtml(c) {
     </dd></div>`;
 }
 
-/** Чужая или ничья заявка: менеджер сначала берёт её себе — это видно в журнале. */
+/** Чужая или ничья заявка: смотреть можно, менять — после «Взять в работу». */
 function takeHtml(c) {
   const u = me();
-  if (u.role !== 'manager' || !u.id || c.manager_id === u.id || c.stage === 'closed') return '';
-  const foreign = Boolean(c.manager_id);
-  return `<div class="take-note ${foreign ? 'foreign' : ''}"><span>${foreign
-    ? `Заявку ведёт <b>${esc(mgrName(c.manager_id) || 'другой менеджер')}</b>. Менять её может он или владелец.`
-    : 'У заявки нет ответственного.'}</span><button class="btn sm primary" data-a="take">Взять себе</button></div>`;
+  if (!u.id || c.manager_id === u.id || c.stage === 'closed') return '';
+  if (u.role === 'owner' && !canTake(c)) return '';
+  const text = c.manager_id
+    ? (c.open_at ? `Заявку ведёт <b>${esc(mgrName(c.manager_id))}</b>, но задача просрочена — её может взять любой.`
+      : `Заявку ведёт <b>${esc(mgrName(c.manager_id) || 'другой менеджер')}</b>. Смотреть можно, менять — только ему.`)
+    : offerLeft(c) && c.offered_to !== u.id ? `Заявка в очереди у менеджера <b>${esc(mgrName(c.offered_to))}</b> до ${hhmm(c.offer_due_at)}. Если он не возьмёт её в работу — она перейдёт дальше.`
+    : offerLeft(c) ? `Заявка предложена вам — возьмите её в работу до <b>${hhmm(c.offer_due_at)}</b>, иначе она уйдёт следующему.`
+    : 'Свободная заявка: кто первым возьмёт в работу, тот и ведёт.';
+  return `<div class="take-note ${c.manager_id && !c.open_at ? 'foreign' : ''}"><span>${text}</span>${canTake(c)
+    ? '<button class="btn sm primary" data-a="take">Взять в работу</button>' : ''}</div>`;
 }
 
 /** Ответственный и звонки (ТЗ §4.1, §6): первый экран карточки, а не вкладка. */
@@ -1634,7 +1713,8 @@ function callHtml(c) {
   const local = (d) => new Date(d.getTime() - d.getTimezoneOffset() * 6e4).toISOString().slice(0, 16);
   const tomorrow = new Date(); tomorrow.setDate(tomorrow.getDate() + 1); tomorrow.setHours(10, 0, 0, 0);
   return `${warnHtml(c)}<div class="callbox ${cs || ''}">
-    <div class="kv"><dt>Ответственный</dt><dd><select data-r="mgr"><option value="">не назначен</option>${ms.map((m) =>
+    ${!isOwner() ? `<div class="kv"><dt>Ведёт</dt><dd>${c.manager_id ? esc(mgrName(c.manager_id)) : offerLeft(c) ? 'предложена: ' + esc(mgrName(c.offered_to)) : 'никто — свободная'}</dd></div>` : ''}
+    <div class="kv" ${isOwner() ? '' : 'hidden'}><dt>Ответственный</dt><dd><select data-r="mgr"><option value="">не назначен</option>${ms.map((m) =>
       `<option value="${m.id}" ${c.manager_id === m.id ? 'selected' : ''}>${esc(m.name)}${m.active ? '' : ' (не принимает)'}</option>`).join('')}
       ${c.manager_id && !ms.some((m) => m.id === c.manager_id) ? '<option selected>удалён</option>' : ''}</select></dd></div>
     ${c.assigned_at ? `<div class="kv"><dt>${c.handoff_due_at ? 'Передано' : 'Назначено'}</dt><dd>${dayTime(c.assigned_at)}</dd></div>` : ''}
@@ -1676,14 +1756,7 @@ const REC_MIME = { mp3: 'audio/mpeg', m4a: 'audio/mp4', wav: 'audio/wav', ogg: '
 
 function bindCalls(root, convId) {
   const take = root.querySelector('[data-a="take"]');
-  if (take) take.onclick = async () => {
-    try {
-      await api(`/api/conversations/${convId}/manager`, { method: 'POST', body: JSON.stringify({ manager_id: me().id }) });
-      toast('Заявка ваша');
-      loadList();
-      openConv(convId, drawerOpen);
-    } catch (e) { toast(e.message, true); }
-  };
+  if (take) take.onclick = () => takeConv(convId);
   const mgr = root.querySelector('[data-r="mgr"]');
   if (mgr) mgr.onchange = async () => {
     try {
@@ -2440,11 +2513,13 @@ const unit = (id, val, suffix, min, max) =>
 
 // Языки и услуги, которые берёт менеджер. Ничего не отмечено — берёт любые.
 const chipT = (cls, val, label, on) => `<label class="chip-t"><input type="checkbox" class="${cls}" value="${esc(val)}" ${on ? 'checked' : ''}><span>${esc(label)}</span></label>`;
+// Очередь: языки, сколько новых заявок в день и место в очереди (стрелки)
 const mgrRules = (m) => {
   const has = (list, v) => String(list || '').split(',').includes(v);
   return `<div class="m-rules"><b>Языки:</b>${Object.entries(state.langs || {}).map(([k, t]) => chipT('m-lang', k, t, has(m.langs, k))).join('')}
-    <b>Услуги:</b>${(state.services || []).map((v) => chipT('m-svc', v, v, has(m.services, v))).join('')}
-    <span>${m.langs || m.services ? '' : '— берёт любые'}</span></div>`;
+    <b>В день:</b><input type="number" class="m-quota" min="0" max="500" step="1" value="${Number(m.daily_quota) || 0}" title="0 — новые заявки не получает, берёт из общего списка">
+    <span class="m-q-hint">${Number(m.daily_quota) ? 'заявок первым' : 'только из общего списка'}</span>
+    <span class="m-order"><button type="button" class="btn ghost sm m-up" title="Выше в очереди">↑</button><button type="button" class="btn ghost sm m-down" title="Ниже в очереди">↓</button></span></div>`;
 };
 const mgrRow = (m) => `<div class="mgr-row" data-id="${m.id || ''}">
   <input type="text" class="m-name" value="${esc(m.name || '')}" placeholder="Имя">
@@ -2572,15 +2647,13 @@ function renderSettings() {
           `<input type="text" id="f-adminurl" value="${esc(s.admin_url || '')}" placeholder="https://clining-ai.onrender.com">`))
     },
     team: {
-      lead: 'Каждая новая заявка сразу получает ответственного: из тех, кто принимает заявки и подходит по языку клиента и услуге, — по очереди. Ему же уходят уведомления. Повторный клиент возвращается к своему менеджеру. Владельцу приходят просрочки и вечерний отчёт.',
+      lead: 'Новая заявка предлагается первому сверху менеджеру, который принимает заявки, говорит на языке клиента и ещё не набрал свою норму за день. Норма набрана — следующему. У всех набрана — заявка падает в общий список, её видят все. Менять заявку может только тот, кто нажал «Взять в работу».',
       body: grp('Список', 'Номер — с кодом страны, на него придут уведомления в WhatsApp. Логин и пароль — для входа в CRM под своим именем; пароль хранится зашифрованным, посмотреть его нельзя, только задать новый. «Владелец» видит настройки и журналы, «менеджер» — только заявки. «Принимает заявки» выключите на время отпуска.',
           `<div id="f-team" class="team">${(s.managers || []).map(mgrRow).join('')}</div>
            <div class="team-add"><button class="btn ghost sm" id="f-addmgr">+ Добавить</button></div>`)
-        + grp('Распределение', 'Языки и услуги отмечаются у каждого менеджера выше. Заявка сначала идёт тому, у кого её язык или услуга отмечены; кто ничего не отметил, берёт остальные и подхватывает, когда профильного нет. Если по правилам не подходит никто, заявку всё равно получит кто-то из принимающих — ничьих заявок не бывает. Услуга учитывается, когда она уже известна; на первом сообщении обычно решает язык.',
-          srow('Назначать сразу', 'Ответственный появляется с первым сообщением клиента. Выключите — как раньше, только когда бот зовёт человека.',
-            `<label class="switch"><input type="checkbox" id="f-assignnew" ${s.assign_new ? 'checked' : ''}></label>`)
-          + srow('Забирать при просрочке', 'Ответственный не позвонил к сроку и не писал клиенту — заявка уходит следующему подходящему, ему и владельцу приходит уведомление. Один раз на заявку, дальше решает владелец.',
-            `<label class="switch"><input type="checkbox" id="f-reassign" ${s.reassign_on ? 'checked' : ''}></label>`))
+        + grp('Очередь заявок', 'Порядок — как в списке выше, меняется стрелками. «В день» — сколько новых заявок менеджер получает первым; 0 — не получает, берёт только из общего списка. Язык не отмечен — берёт заявки на любом языке. Выключенный «принимает заявки» очередь пропускает.',
+          srow('Время, чтобы взять в работу', 'Не нажал «Взять в работу» за это время (рабочее) — заявка уходит следующему, ему приходит уведомление.', unit('f-offermin', s.offer_minutes ?? 60, 'минут', 5, 480))
+          + srow('Открыть заявку всем после просрочки', 'Задача ответственного (звонок или действие) просрочена на столько часов — карточку может взять любой, остальным приходит уведомление «клиент ждёт».', unit('f-openhrs', s.open_after_hours ?? 5, 'часов', 1, 72)))
         + grp('Срок первого звонка', 'После передачи у заявки появляется срок «позвонить до». Ночью и в выходные отсчёт начинается с открытия рабочего дня. Просрочка подсвечивается красным, и о ней пишут ответственному и владельцу.',
           srow('Позвонить в течение', '', unit('f-sla', s.call_sla_min ?? 5, 'минут', 1, 240)))
         + grp('Записи разговоров', 'Запись прикрепляют к звонку в карточке: MP3, M4A, WAV или OGG. Слушать могут только те, кто входит в админку.',
@@ -2736,10 +2809,20 @@ function renderSettings() {
     $('#i-me').textContent = waState.me ? '+' + waState.me : '—';
   }
   mgrGone = new Set();
-  const bindMgr = (row) => { row.querySelector('.m-del').onclick = () => {
-    if (row.dataset.id) mgrGone.add(Number(row.dataset.id));
-    row.remove(); setDirty(true);
-  }; };
+  const bindMgr = (row) => {
+    row.querySelector('.m-del').onclick = () => {
+      if (row.dataset.id) mgrGone.add(Number(row.dataset.id));
+      row.remove(); setDirty(true);
+    };
+    row.querySelector('.m-up') && (row.querySelector('.m-up').onclick = () => {
+      if (row.previousElementSibling) { row.parentNode.insertBefore(row, row.previousElementSibling); setDirty(true); }
+    });
+    row.querySelector('.m-down') && (row.querySelector('.m-down').onclick = () => {
+      if (row.nextElementSibling) { row.parentNode.insertBefore(row.nextElementSibling, row); setDirty(true); }
+    });
+    const q = row.querySelector('.m-quota');
+    q && q.addEventListener('input', () => { row.querySelector('.m-q-hint').textContent = Number(q.value) ? 'заявок первым' : 'только из общего списка'; });
+  };
   $$('.mgr-row').forEach(bindMgr);
   $('#f-addmgr') && ($('#f-addmgr').onclick = () => {
     $('#f-team').insertAdjacentHTML('beforeend', mgrRow({ role: 'manager', active: 1 }));
@@ -2854,15 +2937,15 @@ async function saveSettings() {
   }
   put('#f-offerwait', 'offer_wait_hours'); put('#f-mediawait', 'media_wait_hours');
   if ($('#f-evening')) body.evening_report = $('#f-evening').checked;
-  if ($('#f-assignnew')) body.assign_new = $('#f-assignnew').checked;
-  if ($('#f-reassign')) body.reassign_on = $('#f-reassign').checked;
+  put('#f-offermin', 'offer_minutes'); put('#f-openhrs', 'open_after_hours');
   put('#f-sla', 'call_sla_min'); put('#f-recmax', 'rec_max_mb'); put('#f-reckeep', 'rec_keep_days');
   // менеджеры — отдельные записи: сначала проверяем все, потом сохраняем
   const rows = $$('.mgr-row').map((r) => ({ id: Number(r.dataset.id) || undefined, name: r.querySelector('.m-name').value.trim(),
     phone: r.querySelector('.m-phone').value, role: r.querySelector('.m-role').value, active: r.querySelector('.m-active').checked,
     login: r.querySelector('.m-login').value.trim(), password: r.querySelector('.m-pass').value,
     langs: [...r.querySelectorAll('.m-lang:checked')].map((x) => x.value).join(','),
-    services: [...r.querySelectorAll('.m-svc:checked')].map((x) => x.value).join(',') }));
+    daily_quota: Number(r.querySelector('.m-quota')?.value) || 0 }));
+  rows.forEach((m, i) => { m.sort = i + 1; });   // порядок строк — порядок очереди
   if (rows.some((m) => !m.name && m.phone)) return toast('У менеджера нужно имя');
   for (const id of mgrGone) await api(`/api/managers/${id}`, { method: 'DELETE' });
   try {

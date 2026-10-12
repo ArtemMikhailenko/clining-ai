@@ -130,6 +130,12 @@ if (!mgrCols.includes('langs')) {
   db.exec("ALTER TABLE managers ADD COLUMN services TEXT NOT NULL DEFAULT ''");
   db.exec('ALTER TABLE managers ADD COLUMN last_lead_at TEXT');
 }
+// Очередь заявок: сколько новых заявок в день получает менеджер и его место в очереди
+if (!mgrCols.includes('daily_quota')) {
+  db.exec('ALTER TABLE managers ADD COLUMN daily_quota INTEGER NOT NULL DEFAULT 0');
+  db.exec('ALTER TABLE managers ADD COLUMN sort INTEGER NOT NULL DEFAULT 0');
+  db.exec('UPDATE managers SET sort = id');
+}
 db.exec(`CREATE TABLE IF NOT EXISTS sessions (
   token_hash TEXT PRIMARY KEY,
   user_id    INTEGER NOT NULL,              -- 0 — администратор из переменных окружения
@@ -203,6 +209,28 @@ if (!cols.includes('manager_id')) {
 }
 // сколько раз заявку забирали у менеджера за просроченный звонок
 if (!cols.includes('reassigns')) db.exec('ALTER TABLE conversations ADD COLUMN reassigns INTEGER NOT NULL DEFAULT 0');
+// «Взять в работу»: заявку сначала предлагают менеджеру из очереди, ответственным
+// (manager_id) он становится, только когда сам взял её. open_at — карточка открыта
+// всем: задача просрочена, клиента может взять любой
+if (!cols.includes('offered_to')) {
+  db.exec('ALTER TABLE conversations ADD COLUMN offered_to INTEGER');
+  db.exec('ALTER TABLE conversations ADD COLUMN offered_at TEXT');
+  db.exec('ALTER TABLE conversations ADD COLUMN offer_due_at TEXT');
+  db.exec('ALTER TABLE conversations ADD COLUMN offer_tried TEXT');      // кому уже предлагали: «3,5»
+  db.exec('ALTER TABLE conversations ADD COLUMN taken_at TEXT');
+  db.exec('ALTER TABLE conversations ADD COLUMN open_at TEXT');
+  db.exec('UPDATE conversations SET taken_at = COALESCE(assigned_at, created_at) WHERE manager_id IS NOT NULL');
+}
+// журнал распределения — из него статистика по менеджерам
+db.exec(`CREATE TABLE IF NOT EXISTS assign_log (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  conv_id    INTEGER NOT NULL,
+  manager_id INTEGER,                    -- пусто: заявка ушла в общий список
+  kind       TEXT NOT NULL,              -- offered | taken | expired | lost | pool | opened
+  note       TEXT,
+  at         TEXT NOT NULL DEFAULT (datetime('now'))
+)`);
+db.exec('CREATE INDEX IF NOT EXISTS idx_assign_log ON assign_log(manager_id, kind, at)');
 // Следующее действие менеджера (ТЗ §4.1): что, кто, к какому сроку
 if (!cols.includes('next_action')) {
   db.exec('ALTER TABLE conversations ADD COLUMN next_action TEXT');
@@ -543,6 +571,10 @@ seed.run('source_map', '');
 seed.run('call_sla_min', '5');
 // ответственный — с первого сообщения клиента, а не только когда бот зовёт человека
 seed.run('assign_new', '1');
+// сколько минут у менеджера, чтобы взять предложенную заявку в работу
+seed.run('offer_minutes', '60');
+// через сколько часов просрочки задачи карточка открывается всем
+seed.run('open_after_hours', '5');
 // Google Календарь: что уже отправили, чтобы менять только разницу
 db.exec(`CREATE TABLE IF NOT EXISTS gcal_events (
   key         TEXT PRIMARY KEY,          -- job:conv:12, job:manual:5, call:12, next:12, follow:12

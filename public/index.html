@@ -250,6 +250,18 @@ header .sub{color:var(--muted);font-size:12.5px;margin-top:2px;letter-spacing:0}
 .chip.wait::before{background:var(--s1)}
 .chip.call{color:var(--human);border-color:color-mix(in srgb,var(--human) 30%,transparent);background:var(--human-soft)}
 .chip.call::before{background:var(--human)}
+/* кто ведёт заявку */
+.chip.own{background:var(--green-soft);color:var(--green);border-color:color-mix(in srgb,var(--green) 28%,transparent);font-weight:540}
+.chip.own.me{background:var(--accent-soft);color:var(--accent-2);border-color:color-mix(in srgb,var(--accent) 35%,transparent)}
+.chip.offer{background:var(--warn-soft);color:var(--warn);border-color:color-mix(in srgb,var(--warn) 28%,transparent)}
+.chip.free{color:var(--text-2);border-style:dashed}
+.chip.free::before{background:var(--muted)}
+.lown{display:inline-block;font-size:10.5px;font-weight:560;padding:0 5px;border-radius:4px;margin-right:5px;vertical-align:1px;
+  background:var(--surface-2);color:var(--text-2)}
+.lown.own{background:var(--green-soft);color:var(--green)}
+.lown.me{background:var(--accent-soft);color:var(--accent-2)}
+.lown.offer{background:var(--warn-soft);color:var(--warn)}
+.lown.free{border:1px dashed var(--border);background:transparent}
 .chip.late{color:var(--danger);border-color:color-mix(in srgb,var(--danger) 32%,transparent);background:var(--danger-soft);font-weight:520}
 .chip.late::before{background:var(--danger)}
 .chip.review{background:color-mix(in srgb,var(--s5) 12%,transparent);color:var(--s5);border-color:color-mix(in srgb,var(--s5) 30%,transparent)}
@@ -323,6 +335,17 @@ header .sub{color:var(--muted);font-size:12.5px;margin-top:2px;letter-spacing:0}
 .ph .r{margin-left:auto;display:flex;gap:14px;font-size:11.5px;color:var(--muted);align-items:center;white-space:nowrap}
 .ph .r i{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:6px}
 .panel-foot{margin-top:auto;padding-top:14px}
+.team-panel .ph{flex-wrap:wrap}.team-panel .seg{margin-left:auto}
+.team-stats .tbl-wrap{overflow-x:auto}
+.team-tbl{width:100%;border-collapse:collapse;font-size:13px;min-width:640px}
+.team-tbl th{font-size:11px;font-weight:540;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;text-align:left;padding:6px 8px;border-bottom:var(--hair) solid var(--border)}
+.team-tbl td{padding:9px 8px;border-bottom:var(--hair) solid var(--border-soft);vertical-align:top}
+.team-tbl tr:last-child td{border-bottom:0}
+.team-tbl .num{text-align:right;font-variant-numeric:tabular-nums}
+.team-tbl td.good{color:var(--green);font-weight:560}.team-tbl td.bad{color:var(--danger);font-weight:560}.team-tbl td.zero{color:var(--muted)}
+.team-tbl small{display:block;font-size:11px;color:var(--muted);font-weight:400}
+.team-tbl tr.off td{opacity:.55}
+.team-pool{margin-top:10px;font-size:12.5px;color:var(--text-2)}
 .pempty{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;
   color:var(--muted);font-size:12.5px;min-height:120px;border:1px dashed var(--border);border-radius:var(--r-md)}
 .pempty svg{width:22px;height:22px;opacity:.6}
@@ -1278,6 +1301,11 @@ button,a,.lrow,.card,.frow{-webkit-tap-highlight-color:transparent;touch-action:
 .chip-t span{padding:3px 9px;border-radius:999px;border:var(--hair) solid var(--border);color:var(--text-2);background:var(--surface);font-size:12px}
 .chip-t input:checked+span{background:var(--accent-soft);border-color:var(--accent);color:var(--accent-2)}
 .chip-t input:focus-visible+span{box-shadow:var(--ring)}
+.m-rules .m-quota{width:64px;font:inherit;font-size:12.5px;padding:3px 6px;border-radius:7px;border:var(--hair) solid color-mix(in srgb,var(--text) 16%,transparent);
+  background:var(--surface);color:var(--text);font-variant-numeric:tabular-nums}
+.m-rules .m-q-hint{font-size:11.5px;color:var(--muted)}
+.m-rules .m-order{margin-left:auto;display:flex;gap:2px}
+.m-rules .m-order .btn{padding:1px 8px}
 @media (max-width:720px){
   .mgr-row{grid-template-columns:1fr 1fr;padding-bottom:10px;border-bottom:var(--hair) solid var(--border-soft)}
 }
