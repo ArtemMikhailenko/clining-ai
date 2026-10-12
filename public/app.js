@@ -2052,6 +2052,8 @@ const SET_SECTIONS = [
     i:'<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.8-3.5 3.4-5.5 6.5-5.5s5.7 2 6.5 5.5"/><path d="M16 4.6a3.5 3.5 0 0 1 0 6.8M18.5 14.8c1.6.8 2.7 2.6 3 5.2"/>' },
   { k:'ads', t:'Реклама', d:'кампании и метки',
     i:'<path d="M3 11v2a1 1 0 0 0 1 1h3l5 4V6L7 10H4a1 1 0 0 0-1 1z"/><path d="M16 9a4 4 0 0 1 0 6"/><path d="M19 6a8 8 0 0 1 0 12"/>' },
+  { k:'calendar', t:'Google Календарь', d:'уборки и напоминания',
+    i:'<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/><path d="m9 15 2 2 4-4"/>' },
   { k:'logs', t:'Журнал', d:'изменения, входы, сбои',
     i:'<path d="M8 4h11a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H8"/><path d="M4 4h4v16H4z"/><path d="M12 9h5M12 13h5M12 17h3"/>' },
   { k:'data', t:'Данные', d:'сброс перед рекламой',
@@ -2065,7 +2067,7 @@ let logTab = 'audit';
 const ACCESS_T = { login: 'вход', login_failed: 'неудачный вход', logout: 'выход', recording_listen: 'прослушал запись',
   recording_delete: 'удалил запись', recording_restore: 'вернул запись', lead_delete: 'удалил заявку', lead_restore: 'вернул заявку',
   backup_export: 'скачал резервную копию', data_reset: 'стёр данные', password_set: 'задал пароль' };
-const KIND_T = { notify: 'уведомление команде', whatsapp: 'сообщение клиенту', ai: 'модель ИИ', stt: 'расшифровка голоса' };
+const KIND_T = { notify: 'уведомление команде', whatsapp: 'сообщение клиенту', ai: 'модель ИИ', stt: 'расшифровка голоса', gcal: 'Google Календарь' };
 const STATUS_T = { retry: 'повторяем', done: 'доставлено повторно', failed: 'не удалось' };
 
 async function loadMetaBox() {
@@ -2083,6 +2085,30 @@ async function loadMetaBox() {
       try { const r = await api('/api/meta/sync', { method: 'POST', body: '{}' }); toast(`Загружено строк расхода: ${r.rows ?? 0}`); }
       catch (err) { toast(err.message, true); }
       loadMetaBox();
+    });
+  } catch (e) { box.textContent = e.message; }
+}
+
+async function loadGcalBox() {
+  const box = $('#f-gcal');
+  try {
+    const g = await api('/api/gcal/status');
+    const when = (s) => (s ? new Date(s).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—');
+    const cal = (k, t) => { const c = g.calendars[k]; return c ? `${t}: ${c.ok ? '✓ ' + esc(c.name || '') : '<span class="err">' + esc(c.error) + '</span>'}` : ''; };
+    const bad = g.configured && (g.last_error || Object.values(g.calendars).some((c) => !c.ok && c.error !== 'не указан'));
+    box.innerHTML = `<div class="meta-st ${!g.configured ? 'off' : bad ? 'bad' : 'ok'}">
+        <b>${!g.configured ? 'Не подключено: на сервере нет ключа' : bad ? 'Есть ошибка' : g.on ? 'Подключено' : 'Ключ на месте, синхронизация выключена'}</b>
+        ${g.email ? `<span>Сервисный аккаунт: <code>${esc(g.email)}</code> — его добавляют в доступ к календарям</span>` : ''}
+        ${g.configured ? `<span>${[cal('job', 'Уборки'), cal('task', 'Напоминания')].filter(Boolean).join(' · ')}</span>
+          <span>последняя синхронизация: ${when(g.last_sync)} · событий: ${g.events}</span>` : ''}
+        ${g.last_error ? `<span class="err">${esc(g.last_error)}</span>` : ''}
+      </div>${g.configured && g.on ? '<button class="btn sm" id="f-gcalsync">Синхронизировать сейчас</button>' : ''}`;
+    $('#f-gcalsync') && ($('#f-gcalsync').onclick = async (e) => {
+      e.target.disabled = true; e.target.textContent = 'Отправляем…';
+      try { const r = await api('/api/gcal/sync', { method: 'POST', body: '{}' });
+        toast(r.skipped ? 'Синхронизация уже идёт' : `Создано ${r.created}, обновлено ${r.updated}, удалено ${r.deleted}`); }
+      catch (err) { toast(err.message, true); }
+      loadGcalBox();
     });
   } catch (e) { box.textContent = e.message; }
 }
@@ -2354,6 +2380,19 @@ function renderSettings() {
         + grp('Что реально приходило', 'Последние объявления и метки, с которых писали клиенты. Отсюда удобно взять ключ для справочника.',
           swide('<div id="f-srclist" class="srclist">загружаем…</div>'))
     },
+    calendar: {
+      lead: 'CRM сама переносит в Google Календарь подтверждённые уборки и задачи менеджеров — раз в минуту, в одну сторону. Перенесли дату или закрыли задачу — событие в календаре тоже поменяется или исчезнет. Менеджеры видят календари у себя в телефоне, напоминает Google.',
+      body: grp('Подключение', 'Ключ сервисного аккаунта Google — секрет, он задаётся на сервере в переменной GOOGLE_SERVICE_ACCOUNT. Каждый календарь нужно открыть для адреса сервисного аккаунта с правом «Внесение изменений в мероприятия».',
+          '<div id="f-gcal" class="metabox">проверяем…</div>'
+          + srow('Синхронизировать', 'Выключите — события в календаре останутся, но обновляться перестанут.',
+            `<label class="switch"><input type="checkbox" id="f-gcalon" ${s.gcal_on ? 'checked' : ''}></label>`))
+        + grp('Календари', 'Идентификатор — в настройках календаря Google, раздел «Интеграция календаря». Пустое поле — этот календарь не ведём.',
+          srow('Уборки', 'Заявки с подтверждённой датой и уборки, заведённые вручную. Прошедшие остаются как история.',
+            `<input type="text" id="f-gcaljobs" class="mono" value="${esc(s.gcal_jobs_id || '')}" placeholder="…@group.calendar.google.com">`)
+          + srow('Напоминания', 'Звонки, следующие действия и напоминания менеджеров — с именем ответственного. Выполнили — событие исчезает.',
+            `<input type="text" id="f-gcaltasks" class="mono" value="${esc(s.gcal_tasks_id || '')}" placeholder="…@group.calendar.google.com">`)
+          + srow('Длительность уборки', 'Если у записи указано время. Без времени событие ставится на весь день.', unit('f-gcalhours', s.gcal_job_hours ?? 3, 'часа', 1, 12)))
+    },
     data: {
       lead: 'Резервная копия данных и сброс тестовых диалогов. Настройки, прайс, расписание и привязка WhatsApp при сбросе остаются на месте.',
       body: grp('Резервная копия', 'База и все присланные файлы одним архивом. Диск сервера на этом тарифе не копируется, поэтому скачивайте архив хотя бы раз в неделю и перед любыми большими изменениями. Ключи WhatsApp в архив не входят.',
@@ -2410,6 +2449,7 @@ function renderSettings() {
   }
   if ($('#f-hours')) renderHourRows(state.work_hours || {});
   if ($('#f-meta')) loadMetaBox();
+  if ($('#f-gcal')) loadGcalBox();
   if ($('#f-spend')) loadSpendBox();
   if ($('#f-logs')) {
     $$('[data-log]').forEach((b) => b.onclick = () => { logTab = b.dataset.log; renderSettings(); });
@@ -2543,6 +2583,8 @@ async function saveSettings() {
   if ($('#f-nudgeon')) body.nudge_on = $('#f-nudgeon').checked;
   if ($$('.f-media').length) body.media_required = $$('.f-media').filter((x) => x.checked).map((x) => x.dataset.v).join(', ');
   put('#f-adminurl', 'admin_url'); put('#f-sourcemap', 'source_map');
+  put('#f-gcaljobs', 'gcal_jobs_id'); put('#f-gcaltasks', 'gcal_tasks_id'); put('#f-gcalhours', 'gcal_job_hours');
+  if ($('#f-gcalon')) body.gcal_on = $('#f-gcalon').checked;
   put('#f-metaacc', 'meta_ad_account'); put('#f-metasince', 'meta_spend_since'); put('#f-vatrate', 'vat_rate');
   if ($('#f-vatwith')) body.amounts_with_vat = $('#f-vatwith').checked;
   put('#f-effort', 'ai_effort');

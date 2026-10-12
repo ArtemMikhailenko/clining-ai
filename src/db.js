@@ -543,6 +543,19 @@ seed.run('source_map', '');
 seed.run('call_sla_min', '5');
 // ответственный — с первого сообщения клиента, а не только когда бот зовёт человека
 seed.run('assign_new', '1');
+// Google Календарь: что уже отправили, чтобы менять только разницу
+db.exec(`CREATE TABLE IF NOT EXISTS gcal_events (
+  key         TEXT PRIMARY KEY,          -- job:conv:12, job:manual:5, call:12, next:12, follow:12
+  calendar_id TEXT NOT NULL,
+  event_id    TEXT NOT NULL,
+  hash        TEXT NOT NULL,             -- отпечаток отправленного события
+  day         TEXT,
+  updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+)`);
+seed.run('gcal_on', '0');
+seed.run('gcal_jobs_id', '');
+seed.run('gcal_tasks_id', '');
+seed.run('gcal_job_hours', '3');
 // звонок просрочен — заявка уходит следующему подходящему менеджеру
 seed.run('reassign_on', '1');
 // записи разговоров: предел размера файла и срок хранения (0 — хранить всегда)

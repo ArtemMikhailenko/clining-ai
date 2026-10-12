@@ -27,6 +27,7 @@ import { syncMeta, metaStatus, startMeta, accountId as metaAccount } from './met
 import { ATTR_TITLE, PLATFORM_TITLE } from './attribution.js';
 import { localDate } from './schedule.js';
 import { SERVICES } from './leadnorm.js';
+import { syncCalendar, calendarStatus, startCalendar } from './gcal.js';
 import { listManagers, saveManager, deleteManager, getManager, setManager, assignHandoff, clearCallDue,
   listCalls, logCall, saveRecording, sweepRecordings, overdueCalls, CALL_STATUS, recordingFile, deleteRecording,
   restoreRecording, purgeTrash, reassignOverdue, LANGS } from './calls.js';
@@ -76,7 +77,7 @@ const OWNER_ONLY = [
   ['*', /^\/api\/maintenance\//], ['POST', /^\/api\/wa\/(pair|logout|restart)$/], ['POST', /^\/api\/sim\//],
   ['GET', /^\/api\/logs\//], ['POST', /^\/api\/logs\//], ['POST', /^\/api\/conversations\/\d+\/(delete|restore)$/],
   ['GET', /^\/api\/conversations\/deleted$/], ['*', /^\/api\/calls\/\d+\/recording/],
-  ['*', /^\/api\/report/], ['*', /^\/api\/meta\//], ['*', /^\/api\/spend/]
+  ['*', /^\/api\/report/], ['*', /^\/api\/meta\//], ['*', /^\/api\/spend/], ['*', /^\/api\/gcal\//]
 ];
 const CONV_WRITE = /^\/api\/conversations\/(\d+)\/(lead|note|send|mode|stage|flag|reviewed|next|calls|status|payments|payments\/\d+\/delete|works\/\d+\/\w+|new-deal)$/;
 
@@ -196,6 +197,10 @@ app.get('/api/state', (req, res) => {
     media_wait_hours: Number(getSetting('media_wait_hours')) || 24,
     evening_report: getSetting('evening_report') === '1',
     assign_new: getSetting('assign_new') !== '0',
+    gcal_on: getSetting('gcal_on') === '1',
+    gcal_jobs_id: getSetting('gcal_jobs_id') || '',
+    gcal_tasks_id: getSetting('gcal_tasks_id') || '',
+    gcal_job_hours: Number(getSetting('gcal_job_hours')) || 3,
     reassign_on: getSetting('reassign_on') !== '0',
     langs: LANGS, services: SERVICES,
     managers: listManagers(),
@@ -255,6 +260,9 @@ app.post('/api/state', (req, res) => {
   if ('media_required' in req.body) setSetting('media_required', String(req.body.media_required));
   if ('evening_report' in req.body) setSetting('evening_report', req.body.evening_report ? '1' : '0');
   if ('assign_new' in req.body) setSetting('assign_new', req.body.assign_new ? '1' : '0');
+  if ('gcal_on' in req.body) setSetting('gcal_on', req.body.gcal_on ? '1' : '0');
+  for (const k of ['gcal_jobs_id', 'gcal_tasks_id']) if (k in req.body) setSetting(k, String(req.body[k] || '').trim());
+  if ('gcal_job_hours' in req.body) setSetting('gcal_job_hours', String(Math.min(12, Math.max(1, Number(req.body.gcal_job_hours) || 3))));
   if ('reassign_on' in req.body) setSetting('reassign_on', req.body.reassign_on ? '1' : '0');
   if ('repeat_after_days' in req.body) setSetting('repeat_after_days', String(Math.min(90, Math.max(1, Number(req.body.repeat_after_days) || 3))));
   if ('amounts_with_vat' in req.body) setSetting('amounts_with_vat', req.body.amounts_with_vat ? '1' : '0');
@@ -816,6 +824,13 @@ app.post('/api/conversations/:id/new-deal', dealAction((id) => ({ id: newDealFro
 app.get('/api/report', (req, res) => res.json(buildReport(req.query)));
 app.post('/api/report/leads', (req, res) => res.json(leadList(req.body?.ids)));
 app.get('/api/meta/status', (req, res) => res.json(metaStatus()));
+/* Google Календарь: проверка доступа и синхронизация по кнопке */
+app.get('/api/gcal/status', async (req, res) => {
+  try { res.json(await calendarStatus()); } catch (e) { res.status(400).json({ error: e.message }); }
+});
+app.post('/api/gcal/sync', async (req, res) => {
+  try { res.json(await syncCalendar()); } catch (e) { res.status(400).json({ error: e.message }); }
+});
 app.post('/api/meta/sync', async (req, res) => {
   try { res.json(await syncMeta()); } catch (e) { res.status(400).json({ error: e.message }); }
 });
@@ -1105,6 +1120,7 @@ setInterval(async () => {
 setInterval(() => { sweepRecordings(); purgeTrash(); }, 36e5).unref?.();
 startRetries();
 startMeta();
+startCalendar();
 startControl();
 
 app.listen(PORT, async () => {
