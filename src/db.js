@@ -123,6 +123,13 @@ if (!mgrCols.includes('login')) {
   db.exec('ALTER TABLE managers ADD COLUMN last_login_at TEXT');
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_managers_login ON managers(lower(login)) WHERE login IS NOT NULL');
 }
+// Распределение заявок: какие языки и услуги берёт менеджер (пусто — любые)
+// и когда получил последнюю заявку — по этому времени раздаём по очереди
+if (!mgrCols.includes('langs')) {
+  db.exec("ALTER TABLE managers ADD COLUMN langs TEXT NOT NULL DEFAULT ''");
+  db.exec("ALTER TABLE managers ADD COLUMN services TEXT NOT NULL DEFAULT ''");
+  db.exec('ALTER TABLE managers ADD COLUMN last_lead_at TEXT');
+}
 db.exec(`CREATE TABLE IF NOT EXISTS sessions (
   token_hash TEXT PRIMARY KEY,
   user_id    INTEGER NOT NULL,              -- 0 — администратор из переменных окружения
@@ -194,6 +201,8 @@ if (!cols.includes('manager_id')) {
   db.exec('ALTER TABLE conversations ADD COLUMN call_escalated_at TEXT'); // просрочку уже разослали
   db.exec('ALTER TABLE conversations ADD COLUMN handoff_due_at TEXT');    // первый срок: для SLA в «Контроле дня»
 }
+// сколько раз заявку забирали у менеджера за просроченный звонок
+if (!cols.includes('reassigns')) db.exec('ALTER TABLE conversations ADD COLUMN reassigns INTEGER NOT NULL DEFAULT 0');
 // Следующее действие менеджера (ТЗ §4.1): что, кто, к какому сроку
 if (!cols.includes('next_action')) {
   db.exec('ALTER TABLE conversations ADD COLUMN next_action TEXT');
@@ -532,6 +541,10 @@ seed.run('admin_url', '');
 seed.run('source_map', '');
 // ТЗ §2.2: срок первого звонка после передачи, минут
 seed.run('call_sla_min', '5');
+// ответственный — с первого сообщения клиента, а не только когда бот зовёт человека
+seed.run('assign_new', '1');
+// звонок просрочен — заявка уходит следующему подходящему менеджеру
+seed.run('reassign_on', '1');
 // записи разговоров: предел размера файла и срок хранения (0 — хранить всегда)
 seed.run('rec_max_mb', '50');
 seed.run('rec_keep_days', '0');

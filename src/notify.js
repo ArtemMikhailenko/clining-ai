@@ -94,6 +94,7 @@ export async function notifyNewLead(convId, firstText = '', media = []) {
     `🆕 Новая заявка${c.prev_deal_id ? ' (повторный клиент)' : ''} — ${c.name || 'клиент'}, +${c.phone}`,
     `Источник: ${src}`,
     what ? `Пишет: ${what}` : '',
+    getManager(c.manager_id) ? `Ответственный: ${getManager(c.manager_id).name}` : '',
     'Бот уже отвечает.',
     adminLink(convId)
   ].filter(Boolean).join('\n'), { owners: true });

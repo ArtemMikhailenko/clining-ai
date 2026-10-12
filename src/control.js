@@ -69,7 +69,7 @@ export function warnings(c, k = {}) {
   const today = localDate();
 
   if (c.call_due_at && active && parse(c.call_due_at) <= Date.now()) add('late', 'red', 'срок звонка нарушен');
-  if (c.assigned_at && !calls && !c.call_due_at && active) add('no_call', 'red', 'передана, но звонка не было');
+  if (c.handoff_due_at && !calls && !c.call_due_at && active) add('no_call', 'red', 'передана, но звонка не было');
   if (k.norec) add('norec', 'red', 'разговор без записи и без причины');
   if (c.next_action_at && c.next_action && active && parse(c.next_action_at) <= Date.now()) {
     add('task_late', 'red', 'просрочено: ' + c.next_action);
@@ -149,7 +149,9 @@ export function controlDay(date = localDate()) {
   const convs = db.prepare(`SELECT c.*,
       (SELECT max(created_at) FROM messages m WHERE m.conv_id=c.id AND m.direction='in') last_in_at
     FROM conversations c WHERE c.deleted_at IS NULL AND (assigned_at IS NOT NULL OR stage != 'closed')`).all();
-  const handed = convs.filter((c) => c.assigned_at && localDate(parse(c.assigned_at)) === date);
+  // «передана» — бот позвал человека (есть срок первого звонка); ответственный
+  // с первого сообщения передачей не считается
+  const handed = convs.filter((c) => c.handoff_due_at && c.assigned_at && localDate(parse(c.assigned_at)) === date);
   for (const c of convs) c.wait_media = waitsMedia(c);
   annotate(convs);
   const stats = callStats(handed.map((c) => c.id));

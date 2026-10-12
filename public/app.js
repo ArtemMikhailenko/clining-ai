@@ -148,6 +148,8 @@ function columnOf(c) {
 const STAGE_T = { new: 'Новая', clarify: 'Уточнение', offer: 'Предложение отправлено', agreed: 'Согласовано', done: 'Выполнено' };
 const colTitle = (k) => (ALL_COLS.find((x) => x.k === k) || { t: STAGE_T[k] || k }).t;
 
+// Чьи заявки показывать: '' — все, 'mine', 'none' — без ответственного, или id менеджера
+let mgrFilter = (() => { try { return localStorage.getItem('mgrFilter') || ''; } catch { return ''; } })();
 let flagFilter = null;   // 'need' | 'review' | 'call' | 'late' — признаки, по которым смотрят очередь
 // звонок по заявке (ТЗ §2.2): ждём — до срока, просрочен — после
 const callState = (c) => (!c.call_due_at || c.status === 'closed' ? null : dt(c.call_due_at) <= Date.now() ? 'late' : 'call');
@@ -165,6 +167,9 @@ const mgrName = (id) => (state.managers || []).find((m) => m.id === id)?.name ||
 const matches = (c) => {
   // на доске чужие колонки только приглушаются, фильтрует лишь список
   if (stageFilter && leadView === 'list' && columnOf(c) !== stageFilter) return false;
+  if (mgrFilter === 'mine' && c.manager_id !== me().id) return false;
+  if (mgrFilter === 'none' && c.manager_id) return false;
+  if (/^\d+$/.test(mgrFilter) && c.manager_id !== Number(mgrFilter)) return false;
   if (flagFilter === 'need' && !(c.needs_human && c.status !== 'closed')) return false;
   if (flagFilter === 'review' && !c.review) return false;
   if ((flagFilter === 'call' || flagFilter === 'late') && callState(c) !== flagFilter) return false;
@@ -255,8 +260,16 @@ function leadsTools() {
       <button data-v="board" class="${leadView === 'board' ? 'on' : ''}">Доска</button>
       <button data-v="archive" class="${leadView === 'archive' ? 'on' : ''}">Архив</button>
     </div>
-    <div class="hstat" id="hstat"></div>` + searchTool()
+    <div class="hstat" id="hstat"></div>` + mgrFilterTool() + searchTool()
     + `<button class="btn" id="csv">CSV</button>`;
+}
+function mgrFilterTool() {
+  const ms = state.managers || [];
+  if (ms.length < 2 && !me().id) return '';
+  const opt = (v, t) => `<option value="${v}" ${mgrFilter === String(v) ? 'selected' : ''}>${esc(t)}</option>`;
+  return `<select id="mgr-filter" class="mgr-filter ${mgrFilter ? 'on' : ''}" title="Чьи заявки показать">
+    ${opt('', 'Все менеджеры')}${me().id ? opt('mine', 'Мои заявки') : ''}${opt('none', 'Без ответственного')}
+    ${ms.map((m) => opt(m.id, m.name)).join('')}</select>`;
 }
 function calTools() {
   const chev = (d) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="${d}"/></svg>`;
@@ -276,6 +289,12 @@ function bindTools() {
   if (q) q.oninput = (e) => { query = e.target.value; PAGES[page].render(); };
   $$('#days button').forEach((b) => b.onclick = () => { statsDays = Number(b.dataset.d); loadStats(); });
   $('#csv') && ($('#csv').onclick = exportCsv);
+  $('#mgr-filter') && ($('#mgr-filter').onchange = (e) => {
+    mgrFilter = e.target.value;
+    try { localStorage.setItem('mgrFilter', mgrFilter); } catch {}
+    e.target.classList.toggle('on', Boolean(mgrFilter));
+    PAGES[page].render();
+  });
   $$('#view-seg button').forEach((b) => b.onclick = () => {
     leadView = b.dataset.v;
     localStorage.setItem('leadView', leadView);
@@ -691,7 +710,7 @@ function cardHtml(c) {
     ${facts ? `<div class="facts">${facts}</div>` : ''}
     ${thumbs ? `<div class="card-thumbs">${thumbs}</div>` : ''}
     <div class="card-snip" dir="auto">${esc(c.summary || c.last_body || '')}</div>
-    <div class="card-foot">${chipFor(c)}${waitHtml(c)}</div>
+    <div class="card-foot">${chipFor(c)}${waitHtml(c)}${c.manager_id ? `<span class="card-mgr" title="Ответственный">${esc(mgrName(c.manager_id))}</span>` : ''}</div>
   </div>`;
 }
 
@@ -701,6 +720,7 @@ function subLine(n) {
   el.innerHTML = `${n} ${plural(n, 'заявка', 'заявки', 'заявок')}`
     + (stageFilter ? ` · ${esc(colTitle(stageFilter))}` : '')
     + (flagT ? ` · ${flagT}` : '')
+    + (mgrFilter ? ` · ${esc(mgrFilter === 'mine' ? 'мои' : mgrFilter === 'none' ? 'без ответственного' : mgrName(Number(mgrFilter)))}` : '')
     + (stageFilter || flagT ? '<span class="clr" id="clr-stage">сбросить</span>' : '');
   const x = $('#clr-stage');
   if (x) x.onclick = () => { flagFilter = null; setStage(null); };
@@ -1393,7 +1413,7 @@ function callHtml(c) {
     <div class="kv"><dt>Ответственный</dt><dd><select data-r="mgr"><option value="">не назначен</option>${ms.map((m) =>
       `<option value="${m.id}" ${c.manager_id === m.id ? 'selected' : ''}>${esc(m.name)}${m.active ? '' : ' (не принимает)'}</option>`).join('')}
       ${c.manager_id && !ms.some((m) => m.id === c.manager_id) ? '<option selected>удалён</option>' : ''}</select></dd></div>
-    ${c.assigned_at ? `<div class="kv"><dt>Передано</dt><dd>${dayTime(c.assigned_at)}</dd></div>` : ''}
+    ${c.assigned_at ? `<div class="kv"><dt>${c.handoff_due_at ? 'Передано' : 'Назначено'}</dt><dd>${dayTime(c.assigned_at)}</dd></div>` : ''}
     ${cs ? `<div class="kv due"><dt>Позвонить до</dt><dd>${dayTime(c.call_due_at)}${cs === 'late' ? ` <span class="late-tag">просрочено ${lateBy(c.call_due_at)}</span>` : ''}</dd></div>` : ''}
     <div class="call-acts"><button class="btn sm ${cs ? 'primary' : ''}" data-a="call">Записать звонок</button></div>
     <form class="callf" data-r="callf" hidden>
@@ -2154,6 +2174,14 @@ const swide = (control) => `<div class="srow wide"><div class="sc">${control}</d
 const unit = (id, val, suffix, min, max) =>
   `<div class="unit"><input type="number" id="${id}" min="${min}" max="${max}" value="${esc(String(val))}"><span>${suffix}</span></div>`;
 
+// Языки и услуги, которые берёт менеджер. Ничего не отмечено — берёт любые.
+const chipT = (cls, val, label, on) => `<label class="chip-t"><input type="checkbox" class="${cls}" value="${esc(val)}" ${on ? 'checked' : ''}><span>${esc(label)}</span></label>`;
+const mgrRules = (m) => {
+  const has = (list, v) => String(list || '').split(',').includes(v);
+  return `<div class="m-rules"><b>Языки:</b>${Object.entries(state.langs || {}).map(([k, t]) => chipT('m-lang', k, t, has(m.langs, k))).join('')}
+    <b>Услуги:</b>${(state.services || []).map((v) => chipT('m-svc', v, v, has(m.services, v))).join('')}
+    <span>${m.langs || m.services ? '' : '— берёт любые'}</span></div>`;
+};
 const mgrRow = (m) => `<div class="mgr-row" data-id="${m.id || ''}">
   <input type="text" class="m-name" value="${esc(m.name || '')}" placeholder="Имя">
   <input type="tel" class="m-phone mono" value="${m.phone ? '+' + esc(m.phone) : ''}" placeholder="+972 50 123 4567">
@@ -2163,6 +2191,7 @@ const mgrRow = (m) => `<div class="mgr-row" data-id="${m.id || ''}">
     <option value="owner" ${m.role === 'owner' ? 'selected' : ''}>владелец</option></select>
   <label class="switch" title="принимает заявки"><input type="checkbox" class="m-active" ${m.active === 0 ? '' : 'checked'}><span>принимает заявки</span></label>
   <button class="btn ghost sm m-del" title="Удалить">✕</button>
+  ${mgrRules(m)}
   <small class="m-seen">${m.can_login ? `вход есть${m.last_login_at ? ' · последний ' + dayTime(m.last_login_at) : ' · ещё не входил'}` : m.id ? 'входа нет: задайте логин и пароль' : ''}</small></div>`;
 let mgrGone = new Set();
 
@@ -2279,10 +2308,15 @@ function renderSettings() {
           `<input type="text" id="f-adminurl" value="${esc(s.admin_url || '')}" placeholder="https://clining-ai.onrender.com">`))
     },
     team: {
-      lead: 'Заявку, которую бот передал человеку, получает менеджер из этого списка — тот, у кого сейчас меньше ждущих звонка. Ему же уходят уведомления. Владельцу приходят просрочки и вечерний отчёт.',
+      lead: 'Каждая новая заявка сразу получает ответственного: из тех, кто принимает заявки и подходит по языку клиента и услуге, — по очереди. Ему же уходят уведомления. Повторный клиент возвращается к своему менеджеру. Владельцу приходят просрочки и вечерний отчёт.',
       body: grp('Список', 'Номер — с кодом страны, на него придут уведомления в WhatsApp. Логин и пароль — для входа в CRM под своим именем; пароль хранится зашифрованным, посмотреть его нельзя, только задать новый. «Владелец» видит настройки и журналы, «менеджер» — только заявки. «Принимает заявки» выключите на время отпуска.',
           `<div id="f-team" class="team">${(s.managers || []).map(mgrRow).join('')}</div>
            <div class="team-add"><button class="btn ghost sm" id="f-addmgr">+ Добавить</button></div>`)
+        + grp('Распределение', 'Языки и услуги отмечаются у каждого менеджера выше. Заявка сначала идёт тому, у кого её язык или услуга отмечены; кто ничего не отметил, берёт остальные и подхватывает, когда профильного нет. Если по правилам не подходит никто, заявку всё равно получит кто-то из принимающих — ничьих заявок не бывает. Услуга учитывается, когда она уже известна; на первом сообщении обычно решает язык.',
+          srow('Назначать сразу', 'Ответственный появляется с первым сообщением клиента. Выключите — как раньше, только когда бот зовёт человека.',
+            `<label class="switch"><input type="checkbox" id="f-assignnew" ${s.assign_new ? 'checked' : ''}></label>`)
+          + srow('Забирать при просрочке', 'Ответственный не позвонил к сроку и не писал клиенту — заявка уходит следующему подходящему, ему и владельцу приходит уведомление. Один раз на заявку, дальше решает владелец.',
+            `<label class="switch"><input type="checkbox" id="f-reassign" ${s.reassign_on ? 'checked' : ''}></label>`))
         + grp('Срок первого звонка', 'После передачи у заявки появляется срок «позвонить до». Ночью и в выходные отсчёт начинается с открытия рабочего дня. Просрочка подсвечивается красным, и о ней пишут ответственному и владельцу.',
           srow('Позвонить в течение', '', unit('f-sla', s.call_sla_min ?? 5, 'минут', 1, 240)))
         + grp('Записи разговоров', 'Запись прикрепляют к звонку в карточке: MP3, M4A, WAV или OGG. Слушать могут только те, кто входит в админку.',
@@ -2540,11 +2574,15 @@ async function saveSettings() {
   }
   put('#f-offerwait', 'offer_wait_hours'); put('#f-mediawait', 'media_wait_hours');
   if ($('#f-evening')) body.evening_report = $('#f-evening').checked;
+  if ($('#f-assignnew')) body.assign_new = $('#f-assignnew').checked;
+  if ($('#f-reassign')) body.reassign_on = $('#f-reassign').checked;
   put('#f-sla', 'call_sla_min'); put('#f-recmax', 'rec_max_mb'); put('#f-reckeep', 'rec_keep_days');
   // менеджеры — отдельные записи: сначала проверяем все, потом сохраняем
   const rows = $$('.mgr-row').map((r) => ({ id: Number(r.dataset.id) || undefined, name: r.querySelector('.m-name').value.trim(),
     phone: r.querySelector('.m-phone').value, role: r.querySelector('.m-role').value, active: r.querySelector('.m-active').checked,
-    login: r.querySelector('.m-login').value.trim(), password: r.querySelector('.m-pass').value }));
+    login: r.querySelector('.m-login').value.trim(), password: r.querySelector('.m-pass').value,
+    langs: [...r.querySelectorAll('.m-lang:checked')].map((x) => x.value).join(','),
+    services: [...r.querySelectorAll('.m-svc:checked')].map((x) => x.value).join(',') }));
   if (rows.some((m) => !m.name && m.phone)) return toast('У менеджера нужно имя');
   for (const id of mgrGone) await api(`/api/managers/${id}`, { method: 'DELETE' });
   try {

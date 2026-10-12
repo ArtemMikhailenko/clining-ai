@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import { withinWorkHours, scheduleSetting, sweepStale, workHours, isHoliday } from './schedule.js';
 import { quote } from './pricing.js';
 import { notifyHandoff, notifyNewLead } from './notify.js';
-import { assignHandoff } from './calls.js';
+import { assignHandoff, assignNewLead } from './calls.js';
 import { logFailure } from './integrations.js';
 import { amountOf } from './stages.js';
 import { transcribe, sttConfigured } from './stt.js';
@@ -251,10 +251,14 @@ async function processIncoming({ phone, name, text, wa_id, chat_id = null, media
   const body = [text, said].filter(Boolean).join('\n');
 
   const msg = addMessage(conv.id, { direction: 'in', author: 'customer', body, wa_id, media });
-  if (isNewLead) notifyNewLead(conv.id, body, media).catch((e) => console.error('уведомление о новой заявке:', e.message));
   // язык клиента — признак для отчёта по рекламе (ТЗ §9: фильтр по языку)
+  // и для распределения: поэтому определяем его до назначения менеджера
   const lang = dominantLang(history(conv.id, 12));
   if (lang) db.prepare('UPDATE conversations SET lang=? WHERE id=?').run(lang, conv.id);
+  if (isNewLead) {
+    assignNewLead(conv.id);   // уведомление уйдёт уже ответственному, а не всем подряд
+    notifyNewLead(conv.id, body, media).catch((e) => console.error('уведомление о новой заявке:', e.message));
+  }
 
   // Написал вскоре после закрытия (давнее закрытие уже стало новой сделкой выше).
   // Проигранную поднимаем — клиент передумал. Оплаченную не трогаем: это «спасибо»

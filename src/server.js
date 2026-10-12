@@ -26,9 +26,10 @@ import { listPayments, addPayment, deletePayment, listWorks, syncWorkDate, workD
 import { syncMeta, metaStatus, startMeta, accountId as metaAccount } from './meta.js';
 import { ATTR_TITLE, PLATFORM_TITLE } from './attribution.js';
 import { localDate } from './schedule.js';
+import { SERVICES } from './leadnorm.js';
 import { listManagers, saveManager, deleteManager, getManager, setManager, assignHandoff, clearCallDue,
   listCalls, logCall, saveRecording, sweepRecordings, overdueCalls, CALL_STATUS, recordingFile, deleteRecording,
-  restoreRecording, purgeTrash } from './calls.js';
+  restoreRecording, purgeTrash, reassignOverdue, LANGS } from './calls.js';
 import { aiConfigured, aiLabel } from './ai.js';
 
 /* ─────────── Процесс не должен умирать молча ───────────
@@ -194,6 +195,9 @@ app.get('/api/state', (req, res) => {
     offer_wait_hours: Number(getSetting('offer_wait_hours')) || 48,
     media_wait_hours: Number(getSetting('media_wait_hours')) || 24,
     evening_report: getSetting('evening_report') === '1',
+    assign_new: getSetting('assign_new') !== '0',
+    reassign_on: getSetting('reassign_on') !== '0',
+    langs: LANGS, services: SERVICES,
     managers: listManagers(),
     me: req.user,
     me_auth: authEnabled(),
@@ -250,6 +254,8 @@ app.post('/api/state', (req, res) => {
   if ('source_map' in req.body) setSetting('source_map', String(req.body.source_map));
   if ('media_required' in req.body) setSetting('media_required', String(req.body.media_required));
   if ('evening_report' in req.body) setSetting('evening_report', req.body.evening_report ? '1' : '0');
+  if ('assign_new' in req.body) setSetting('assign_new', req.body.assign_new ? '1' : '0');
+  if ('reassign_on' in req.body) setSetting('reassign_on', req.body.reassign_on ? '1' : '0');
   if ('repeat_after_days' in req.body) setSetting('repeat_after_days', String(Math.min(90, Math.max(1, Number(req.body.repeat_after_days) || 3))));
   if ('amounts_with_vat' in req.body) setSetting('amounts_with_vat', req.body.amounts_with_vat ? '1' : '0');
   if ('vat_rate' in req.body) setSetting('vat_rate', String(Math.min(30, Math.max(0, Number(req.body.vat_rate) || 0))));
@@ -1075,9 +1081,20 @@ setInterval(() => {
    Новый срок (следующий звонок) снова включает контроль. */
 setInterval(async () => {
   for (const c of overdueCalls()) {
-    db.prepare("UPDATE conversations SET call_escalated_at=datetime('now') WHERE id=?").run(c.id);
     let l = {};
     try { l = JSON.parse(c.lead || '{}'); } catch {}
+    // сначала пробуем отдать заявку другому: пока ответственный молчит, клиент остывает
+    const moved = reassignOverdue(c);
+    if (moved) {
+      const who = `${l.name || c.name || 'клиент'}, +${c.phone}`;
+      await notifyManagers(`🔁 Заявка передана вам: ${who}\n${moved.from?.name || 'Ответственный'} не позвонил вовремя.`
+        + ` Позвоните до ${localTime(moved.due)}\n${adminLink(c.id)}`, { managerId: moved.to.id, owners: true }).catch(() => {});
+      if (moved.from?.phone) await notifyManagers(`Заявку ${who} передали ${moved.to.name}: звонок был просрочен.`,
+        { managerId: moved.from.id }).catch(() => {});
+      emit('conversations', null);
+      continue;
+    }
+    db.prepare("UPDATE conversations SET call_escalated_at=datetime('now') WHERE id=?").run(c.id);
     const m = getManager(c.manager_id);
     await notifyManagers(`⏰ Просрочен звонок: ${l.name || c.name || 'клиент'}, +${c.phone}`
       + `\nСрок был ${localTime(c.call_due_at)}${m ? `, ответственный ${m.name}` : ', ответственный не назначен'}`

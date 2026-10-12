@@ -228,6 +228,11 @@ header .sub{color:var(--muted);font-size:12.5px;margin-top:2px;letter-spacing:0}
 .search:focus-within{border-color:var(--accent);box-shadow:var(--ring)}
 .search input{border:0;background:transparent;outline:none;width:100%;font-size:13px}
 .search svg{flex:none;opacity:.45}
+.mgr-filter{background:var(--surface-2);border:var(--hair) solid var(--border);border-radius:var(--r-sm);padding:5px 8px;
+  font:inherit;font-size:12.5px;color:var(--text);outline:none;max-width:150px;cursor:pointer}
+.mgr-filter:focus{border-color:var(--accent);box-shadow:var(--ring)}
+.card-mgr{margin-left:auto;font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:45%}
+.mgr-filter.on{border-color:var(--accent);color:var(--accent-2);background:var(--accent-soft)}
 .seg{display:flex;background:var(--surface-2);border:var(--hair) solid var(--border);border-radius:9px;padding:2px;gap:2px}
 .seg button{border:0;background:transparent;padding:5px 11px;border-radius:7px;cursor:pointer;font-size:12.5px;font-weight:470;color:var(--muted)}
 .seg button.on{background:var(--surface);color:var(--text);box-shadow:0 1px 2px rgba(16,16,24,.08)}
@@ -1163,6 +1168,15 @@ button,a,.lrow,.card,.frow{-webkit-tap-highlight-color:transparent;touch-action:
 .mgr-row input:focus,.mgr-row select:focus{border-color:var(--accent);box-shadow:var(--ring)}
 .mgr-row .switch span{font-size:12px;color:var(--text-2);white-space:nowrap}
 .team-add{margin-top:10px}
+/* правила распределения: языки и услуги менеджера */
+.m-rules{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:5px;align-items:center;font-size:12px;color:var(--muted)}
+.m-rules b{font-weight:520;color:var(--text-2);margin-right:2px}
+.m-rules b:not(:first-child){margin-left:10px}
+.chip-t{display:inline-flex;cursor:pointer}
+.chip-t input{position:absolute;opacity:0;pointer-events:none}
+.chip-t span{padding:3px 9px;border-radius:999px;border:var(--hair) solid var(--border);color:var(--text-2);background:var(--surface);font-size:12px}
+.chip-t input:checked+span{background:var(--accent-soft);border-color:var(--accent);color:var(--accent-2)}
+.chip-t input:focus-visible+span{box-shadow:var(--ring)}
 @media (max-width:720px){
   .mgr-row{grid-template-columns:1fr 1fr;padding-bottom:10px;border-bottom:var(--hair) solid var(--border-soft)}
 }
