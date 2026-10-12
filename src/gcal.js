@@ -20,9 +20,9 @@ import { logFailure } from './integrations.js';
 const API = 'https://www.googleapis.com/calendar/v3';
 const BACK_DAYS = 7, AHEAD_DAYS = 120;   // окно синхронизации от сегодняшнего дня
 const PER_RUN = 60;                       // запросов за один проход — квоту Google не выбираем
-// цвета событий из палитры Google: зелёный — уборка, оранжевый — звонок,
-// синий — задача, серый — напоминание без времени
-const COLOR = { job: '10', call: '6', task: '9', follow: '8' };
+// цвета событий из палитры Google — как в календаре CRM: зелёный — заказ,
+// синий — звонок, оранжевый — задача, серый — напоминание без времени
+const COLOR = { job: '10', call: '9', task: '6', follow: '8' };
 
 const addDays = (d, n) => new Date(Date.parse(d + 'T12:00:00Z') + n * 864e5).toISOString().slice(0, 10);
 const pad = (n) => String(n).padStart(2, '0');
@@ -87,17 +87,18 @@ const enc = encodeURIComponent;
 
 /** Время события: «09:30» в карточке — точное время, иначе событие на весь день. */
 function localSpan(day, time, minutes) {
-  const m = /^(\d{1,2})[:.](\d{2})/.exec(String(time || '').trim());
-  if (!m || Number(m[1]) > 23) return { start: { date: day }, end: { date: addDays(day, 1) } };
+  // «09:30» — начало, «8:00–14:00» — интервал целиком
+  const ts = [...String(time || '').matchAll(/(\d{1,2})[:.](\d{2})/g)].map((m) => Number(m[1]) * 60 + Number(m[2]));
+  if (!ts.length || ts[0] >= 1440) return { start: { date: day }, end: { date: addDays(day, 1) } };
   const tz = scheduleSetting('timezone');
-  const from = Number(m[1]) * 60 + Number(m[2]);
-  const to = from + minutes;
+  const from = ts[0];
+  const to = ts[1] > from ? ts[1] : from + minutes;
   const at = (d, t) => `${d}T${pad(Math.floor(t / 60) % 24)}:${pad(t % 60)}:00`;
   return { start: { dateTime: at(day, from), timeZone: tz }, end: { dateTime: at(to >= 1440 ? addDays(day, 1) : day, to), timeZone: tz } };
 }
 
 /** Срок из базы (UTC) — точный момент, длительность короткая: это напоминание. */
-function utcSpan(sql, minutes = 15) {
+function utcSpan(sql, minutes = 15) {   // как в календаре CRM: звонок — 15 минут
   const t = Date.parse(String(sql).replace(' ', 'T') + 'Z');
   return { start: { dateTime: new Date(t).toISOString() }, end: { dateTime: new Date(t + minutes * 6e4).toISOString() } };
 }

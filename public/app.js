@@ -7,7 +7,7 @@ let state = {}, convs = [], stats = null, current = null, detail = null;
 // неделя по умолчанию: на молодой базе месячный график вырождается в пустое поле
 let page = 'board', query = '', drawerOpen = false, statsDays = 7;
 let notified = new Set(), dragging = false;
-let jobs = [], weekOffset = 0, animStep = 0;
+let jobs = [], animStep = 0;
 // два вида одних данных: список — работать, доска — видеть воронку целиком
 let leadView = localStorage.getItem('leadView') || 'list';
 // стадия, выбранная в воронке бокового меню; null — показываем все
@@ -272,11 +272,10 @@ function mgrFilterTool() {
     ${ms.map((m) => opt(m.id, m.name)).join('')}</select>`;
 }
 function calTools() {
-  const chev = (d) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="${d}"/></svg>`;
-  return `<div class="seg">
-    <button id="cal-prev" title="Предыдущая неделя">${chev('m15 18-6-6 6-6')}</button>
-    <button id="cal-today" class="${weekOffset === 0 ? 'on' : ''}">Эта неделя</button>
-    <button id="cal-next" title="Следующая неделя">${chev('m9 18 6-6-6-6')}</button></div>
+  const v = (k, t) => `<button data-v="${k}" class="${calView === k ? 'on' : ''}">${t}</button>`;
+  return `<button class="btn" id="cal-today">Сегодня</button>
+    <div class="seg"><button id="cal-prev" title="Назад">‹</button><button id="cal-next" title="Вперёд">›</button></div>
+    <div class="seg" id="cal-view">${v('day', 'День')}${v('week', 'Неделя')}${v('month', 'Месяц')}</div>
     <button class="btn primary" id="cal-add">+ Уборка</button>`;
 }
 function dashTools() {
@@ -300,9 +299,10 @@ function bindTools() {
     localStorage.setItem('leadView', leadView);
     go('inbox');
   });
-  $('#cal-prev') && ($('#cal-prev').onclick = () => { weekOffset--; renderCal(); });
-  $('#cal-next') && ($('#cal-next').onclick = () => { weekOffset++; renderCal(); });
-  $('#cal-today') && ($('#cal-today').onclick = () => { weekOffset = 0; renderCal(); });
+  $('#cal-prev') && ($('#cal-prev').onclick = () => calShift(-1));
+  $('#cal-next') && ($('#cal-next').onclick = () => calShift(1));
+  $('#cal-today') && ($('#cal-today').onclick = () => { calDate = iso(new Date()); calMini = calDate.slice(0, 7); renderCal(); });
+  $$('#cal-view button').forEach((b) => b.onclick = () => { calView = b.dataset.v; store('calView', calView); renderCal(); });
   $('#cal-add') && ($('#cal-add').onclick = () => openJob({ date: iso(new Date()) }));
 }
 
@@ -543,88 +543,285 @@ function renderDash() {
 
 /** Сумма названных цен в колонке — видно, где лежат деньги. */
 
-/* ───── расписание ─────
+/* ───── расписание: календарь как в Google ─────
+   Уборки, пожелания клиентов, звонки, задачи и напоминания на одной сетке.
+   Виды «день / неделя / месяц», слои включаются галочками, как календари в
+   Google. Всё собирается из заявок — отдельно в календаре ничего не хранится.
    Неделя начинается с воскресенья: в Израиле это первый рабочий день. */
 const iso = (d) => new Intl.DateTimeFormat('sv-SE').format(d);
+const WEEK_START = 0;
+const HOUR_PX = 48;
+const CAL_LAYERS = [
+  { k: 'job', t: 'Заказы', c: 'var(--s3)' },
+  { k: 'call', t: 'Звонки', c: 'var(--s1)' },
+  { k: 'task', t: 'Задачи', c: 'var(--s2)' },
+  { k: 'wish', t: 'Хотят, но не записаны', c: 'var(--s4)' },
+  { k: 'follow', t: 'Напоминания', c: 'var(--s5)' },
+  { k: 'bot', t: 'Бот напишет клиенту', c: 'var(--muted)' }
+];
+const store = (k, v) => { try { localStorage.setItem(k, typeof v === 'string' ? v : JSON.stringify(v)); } catch {} };
+const stored = (k, def) => { try { const v = localStorage.getItem(k); return v == null ? def : v; } catch { return def; } };
+let calView = stored('calView', matchMedia('(max-width:860px)').matches ? 'day' : 'week');
+let calDate = iso(new Date());
+let calMini = calDate.slice(0, 7);
+let calWho = stored('calWho', '');
+let calLayers = (() => { try { return { job: 1, wish: 1, call: 1, task: 1, follow: 1, bot: 0, ...JSON.parse(stored('calLayers', '{}')) }; } catch { return { job: 1, wish: 1, call: 1, task: 1, follow: 1, bot: 0 }; } })();
+let calData = { events: [], holidays: [] };
 
-function weekDays(offset) {
-  const now = new Date();
-  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - now.getDay() + offset * 7);
-  return Array.from({ length: 7 }, (_, i) => new Date(start.getFullYear(), start.getMonth(), start.getDate() + i));
+const dOf = (s) => new Date(Number(s.slice(0, 4)), Number(s.slice(5, 7)) - 1, Number(s.slice(8, 10)));
+const addD = (s, n) => { const d = dOf(s); d.setDate(d.getDate() + n); return iso(d); };
+const weekStart = (s) => addD(s, -((dOf(s).getDay() - WEEK_START + 7) % 7));
+const hm = (m) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+const toMin = (t) => { const m = /^(\d{1,2}):(\d{2})/.exec(t || ''); return m ? Number(m[1]) * 60 + Number(m[2]) : null; };
+
+function calRange() {
+  if (calView === 'day') return [calDate, calDate];
+  if (calView === 'week') { const s = weekStart(calDate); return [s, addD(s, 6)]; }
+  const s = weekStart(calDate.slice(0, 8) + '01');
+  return [s, addD(s, 41)];
+}
+function calShift(dir) {
+  if (calView === 'day') calDate = addD(calDate, dir);
+  else if (calView === 'week') calDate = addD(calDate, 7 * dir);
+  else { const d = dOf(calDate.slice(0, 8) + '01'); d.setMonth(d.getMonth() + dir); calDate = iso(d); }
+  calMini = calDate.slice(0, 7);
+  renderCal();
+}
+function calTitle() {
+  const [a, b] = calRange();
+  const da = dOf(a), db = dOf(b);
+  if (calView === 'day') return da.toLocaleDateString('ru-RU', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+  if (calView === 'month') { const t = dOf(calDate).toLocaleDateString('ru-RU', { month: 'long', year: 'numeric' }); return t[0].toUpperCase() + t.slice(1); }
+  return da.getMonth() === db.getMonth()
+    ? `${da.getDate()} — ${db.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric' })}`
+    : `${da.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' })} — ${db.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short', year: 'numeric' })}`;
+}
+
+/** События, которые сейчас видны: включённые слои и выбранный менеджер. */
+function calVisible() {
+  const meId = me().id;
+  return calData.events.filter((e) => calLayers[e.layer]
+    && (!calWho || (calWho === 'mine' ? e.manager_id === meId : e.manager_id === Number(calWho))
+      || (e.layer === 'job' && e.manual)));
+}
+const layerOf = (k) => CAL_LAYERS.find((l) => l.k === k);
+function evTitle(e) {
+  if (e.layer === 'job' || e.layer === 'wish') return e.name;
+  return `${e.what} — ${e.name}`;
+}
+function evSub(e) {
+  if (e.layer === 'job' || e.layer === 'wish') return [e.service, e.area && e.area + ' м²', e.district].filter(Boolean).join(' · ');
+  return e.who || '';
 }
 
 async function renderCal() {
-  const el = $('#cal-week');
-  if (!el) return;
-  jobs = await api('/api/schedule');
-  const days = weekDays(weekOffset);
-  const hours = state.work_hours || {};
-  const hol = Object.fromEntries((await api('/api/holidays')).map((h) => [h.date, h.name]));
-  const today = iso(new Date());
+  const root = $('#gc-main');
+  if (!root) return;
+  const [from, to] = calRange();
+  const keepScroll = $('#gw-body')?.scrollTop;
+  [calData, jobs] = await Promise.all([api(`/api/calendar?from=${from}&to=${to}`), api('/api/schedule')]);
+  $('#pg-sub').textContent = calTitle();
+  $$('#cal-view button').forEach((b) => b.classList.toggle('on', b.dataset.v === calView));
+  renderCalSide();
+  if (calView === 'month') renderMonth(root); else renderWeek(root, keepScroll);
 
-  const from = days[0].toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' });
-  const to = days[6].toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' });
-  $('#pg-sub').textContent = `${from} — ${to}`;
-  $('#cal-today')?.classList.toggle('on', weekOffset === 0);
-
-  const week = jobs.filter((j) => j.date >= iso(days[0]) && j.date <= iso(days[6]));
-  const total = week.reduce((a, j) => a + money(j.price), 0);
-  const pending = week.filter((j) => j.kind === 'wish').length;
-  const free = days.filter((d) => Array.isArray(hours[d.getDay()]) && !hol[iso(d)] && iso(d) >= today
-    && !jobs.some((j) => j.date === iso(d))).length;
-  $('#cal-sum').innerHTML = `
-    <div class="cs"><b>${week.length}</b>${plural(week.length, 'уборка', 'уборки', 'уборок')}</div>
-    <div class="cs gold"><b>${total ? total.toLocaleString('ru-RU') + ' ₪' : '—'}</b>на неделе</div>
-    <div class="cs ${pending ? 'warn' : ''}"><b>${pending}</b>${plural(pending, 'пожелание клиента', 'пожелания клиентов', 'пожеланий клиентов')}</div>
-    <div class="cs"><b>${free}</b>${plural(free, 'свободный день', 'свободных дня', 'свободных дней')}</div>
-    <div class="grow"></div>
-    <div class="cal-legend"><span><i style="background:var(--s3)"></i>записана</span>
-      <span><i style="background:var(--warn)"></i>хочет, но не записан</span><span><i class="hatch"></i>выходной</span></div>`;
-
-  el.innerHTML = days.map((d, di) => {
-    const key = iso(d), mine = jobs.filter((j) => j.date === key);
-    const isHol = hol[key];
-    const h = hours[d.getDay()];
-    const working = Array.isArray(h) && !isHol;
-    const sum = mine.reduce((a, j) => a + money(j.price), 0);
-    const when = working ? h.join('–') : isHol ? 'праздник' : 'выходной';
-    const cls = [!working && 'off', key === today && 'today', key < today && 'past'].filter(Boolean).join(' ');
-    return `<div class="cday ${cls}" data-date="${key}" style="animation-delay:${di * 30}ms">
-      <div class="cday-h"><span class="cday-num">${d.getDate()}</span>
-        <div class="cday-wd"><b>${d.toLocaleDateString('ru-RU', { weekday: 'long' })}</b>
-          <span>${esc(when)}</span></div>
-        ${mine.length ? `<span class="n">${mine.length}</span>` : ''}</div>
-      ${isHol ? `<div class="chol">${esc(isHol)}</div>` : ''}
-      <div class="cday-b">${mine.map(jobHtml).join('')
-        || `<div class="cal-empty">${working && key >= today ? 'свободно' : ''}</div>`}</div>
-      ${sum ? `<div class="cday-f"><span>итого за день</span><b>${sum.toLocaleString('ru-RU')} ₪</b></div>` : ''}
-    </div>`;
-  }).join('');
-  $$('.job', el).forEach((j) => j.onclick = () => (j.dataset.kind === 'manual'
-    ? openJob(jobs.find((x) => x.kind === 'manual' && x.id === Number(j.dataset.id)))
-    : openConv(Number(j.dataset.id), true)));
-  // клик по пустому месту дня — завести уборку на этот день
-  $$('.cday', el).forEach((d) => d.addEventListener('click', (e) => {
-    if (e.target.closest('.job')) return;
-    openJob({ date: d.dataset.date });
-  }));
-
-  const upcoming = jobs.filter((j) => j.date >= today).length;
+  const upcoming = jobs.filter((j) => j.date >= iso(new Date()) && j.kind !== 'wish').length;
   const badge = $('#nav-cal');
   badge.textContent = upcoming; badge.classList.toggle('hidden', !upcoming);
 }
 
-function jobHtml(j, i) {
-  const tag = j.kind === 'wish' ? '<span class="st wish">хочет, не записан</span>'
-    : j.kind === 'manual' ? '<span class="st hand">вручную</span>' : '';
-  return `<div class="job ${j.kind === 'wish' ? 'unconfirmed wish' : ''}" data-id="${j.id}" data-kind="${j.kind}"
-    style="animation-delay:${i * 40}ms">
-    <div class="jt">${ico(ICONS.time)}${esc(j.time || 'время не назначено')}${tag}</div>
-    <b dir="auto">${esc(j.name || '+' + j.phone)}</b>
-    <div class="m">${esc([j.service, j.area && j.area + ' м²'].filter(Boolean).join(' · '))}</div>
-    ${j.district ? `<div class="m" dir="auto">${ico(ICONS.pin)}${esc(j.district)}</div>` : ''}
-    ${j.price ? `<span class="p">${esc(j.price)}</span>` : ''}
-  </div>`;
+function renderCalSide() {
+  const side = $('#gc-side');
+  if (!side) return;
+  // мини-календарь месяца: как слева в Google, клик — перейти к дню
+  const first = calMini + '-01';
+  const start = weekStart(first);
+  const today = iso(new Date());
+  const [a, b] = calRange();
+  const busy = new Set(calData.events.filter((e) => e.layer === 'job').map((e) => e.date));
+  const head = Array.from({ length: 7 }, (_, i) => dOf(addD(start, i)).toLocaleDateString('ru-RU', { weekday: 'narrow' }));
+  const cells = Array.from({ length: 42 }, (_, i) => {
+    const d = addD(start, i);
+    const cls = [d.slice(0, 7) !== calMini && 'out', d === today && 'today', d >= a && d <= b && 'sel', busy.has(d) && 'busy'].filter(Boolean).join(' ');
+    return `<button class="mc ${cls}" data-d="${d}">${Number(d.slice(8))}</button>`;
+  }).join('');
+  const t = dOf(first).toLocaleDateString('ru-RU', { month: 'long', year: 'numeric' });
+  const vis = calVisible();
+  const count = (k) => calData.events.filter((e) => e.layer === k).length;
+  const ms = state.managers || [];
+  const jobsN = vis.filter((e) => e.layer === 'job');
+  const sum = jobsN.reduce((s, e) => s + money(e.price), 0);
+  const late = vis.filter((e) => e.late).length;
+  side.innerHTML = `
+    <div class="mini"><div class="mini-h"><b>${t[0].toUpperCase() + t.slice(1)}</b>
+      <span><button data-m="-1" title="Предыдущий месяц">‹</button><button data-m="1" title="Следующий месяц">›</button></span></div>
+      <div class="mini-g">${head.map((h) => `<i>${h}</i>`).join('')}${cells}</div></div>
+    <div class="gc-sec"><h5>Календари</h5>${CAL_LAYERS.map((l) => `<label class="lay" style="--c:${l.c}">
+      <input type="checkbox" data-l="${l.k}" ${calLayers[l.k] ? 'checked' : ''}><span class="box"></span>${l.t}<em>${count(l.k) || ''}</em></label>`).join('')}</div>
+    ${ms.length ? `<div class="gc-sec"><h5>Менеджер</h5><select id="cal-who" class="mgr-filter ${calWho ? 'on' : ''}">
+      <option value="">Все</option>${me().id ? `<option value="mine" ${calWho === 'mine' ? 'selected' : ''}>Мои</option>` : ''}
+      ${ms.map((m) => `<option value="${m.id}" ${calWho === String(m.id) ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}</select></div>` : ''}
+    <div class="gc-sec gc-sum"><h5>За период</h5>
+      <div><b>${jobsN.length}</b> ${plural(jobsN.length, 'уборка', 'уборки', 'уборок')}${sum ? ` · <b class="gold">${sum.toLocaleString('ru-RU')} ₪</b>` : ''}</div>
+      <div><b>${vis.filter((e) => e.layer === 'call').length}</b> звонков · <b>${vis.filter((e) => e.layer === 'task' || e.layer === 'follow').length}</b> задач</div>
+      ${late ? `<div class="bad"><b>${late}</b> просрочено</div>` : ''}</div>`;
+  $$('.mc', side).forEach((x) => x.onclick = () => { calDate = x.dataset.d; calMini = calDate.slice(0, 7); renderCal(); });
+  $$('[data-m]', side).forEach((x) => x.onclick = () => {
+    const d = dOf(calMini + '-01'); d.setMonth(d.getMonth() + Number(x.dataset.m)); calMini = iso(d).slice(0, 7); renderCalSide();
+  });
+  $$('[data-l]', side).forEach((x) => x.onchange = () => {
+    calLayers[x.dataset.l] = x.checked ? 1 : 0; store('calLayers', calLayers);
+    calView === 'month' ? renderMonth($('#gc-main')) : renderWeek($('#gc-main'), $('#gw-body')?.scrollTop); renderCalSide();
+  });
+  $('#cal-who') && ($('#cal-who').onchange = (e) => { calWho = e.target.value; store('calWho', calWho); renderCal(); });
+}
+
+/** Пересекающиеся по времени события делят ширину колонки, как в Google. */
+function layoutDay(list) {
+  const evs = list.map((e) => ({ e, s: e.start, f: e.start + Math.max(e.dur || 30, 23) })).sort((a, b) => a.s - b.s || b.f - a.f);
+  let group = [], end = -1;
+  const flush = () => {
+    const lanes = [];
+    for (const x of group) {
+      let i = lanes.findIndex((f) => f <= x.s);
+      if (i < 0) { i = lanes.length; lanes.push(0); }
+      lanes[i] = x.f; x.lane = i;
+    }
+    for (const x of group) x.lanes = lanes.length;
+    group = [];
+  };
+  for (const x of evs) {
+    if (x.s >= end && group.length) flush();
+    group.push(x); end = Math.max(end, x.f);
+  }
+  if (group.length) flush();
+  return evs;
+}
+
+function evHtml(e, style = '', short = false) {
+  const l = layerOf(e.layer);
+  const time = e.start != null ? hm(e.start) + (e.dur ? '–' + hm(Math.min(1440, e.start + e.dur)) : '') : '';
+  const title = `${e.layer === 'call' ? '📞 ' : ''}${esc(evTitle(e))}`;
+  const tip = esc([time, evTitle(e), evSub(e), e.price, e.late ? 'просрочено' : ''].filter(Boolean).join(' · '));
+  // короткое событие (звонок на 15 минут) — одной строкой: время и кто
+  if (short) return `<div class="ge short l-${e.layer} ${e.late ? 'late' : ''}" data-k="${esc(e.key)}" style="--c:${l.c};${style}" title="${tip}">
+    <b dir="auto"><s>${hm(e.start)}</s> ${title}</b></div>`;
+  return `<div class="ge l-${e.layer} ${e.late ? 'late' : ''}" data-k="${esc(e.key)}" style="--c:${l.c};${style}" title="${tip}">
+    <b dir="auto">${title}</b>
+    <span>${esc([time, evSub(e)].filter(Boolean).join(' · '))}${e.late ? ' · просрочено' : ''}</span></div>`;
+}
+
+function renderWeek(root, keepScroll) {
+  const [from, to] = calRange();
+  const days = [];
+  for (let d = from; d <= to; d = addD(d, 1)) days.push(d);
+  const today = iso(new Date());
+  const hours = state.work_hours || {};
+  const hol = Object.fromEntries(calData.holidays.map((h) => [h.date, h.name]));
+  const vis = calVisible();
+  const timed = vis.filter((e) => e.start != null);
+  const allDay = vis.filter((e) => e.start == null);
+  // часы сетки: рабочее время с запасом, но так, чтобы влезли все события
+  const wh = Object.values(hours).filter(Array.isArray);
+  let minH = Math.min(7, ...wh.map((h) => Math.floor((toMin(h[0]) ?? 480) / 60)), ...timed.map((e) => Math.floor(e.start / 60)));
+  let maxH = Math.max(21, ...wh.map((h) => Math.ceil((toMin(h[1]) ?? 1200) / 60)), ...timed.map((e) => Math.ceil((e.start + (e.dur || 30)) / 60)));
+  minH = Math.max(0, minH); maxH = Math.min(24, maxH);
+  const H = maxH - minH;
+
+  const head = days.map((d) => {
+    const x = dOf(d);
+    return `<div class="gw-dh ${d === today ? 'today' : ''} ${hol[d] || !Array.isArray(hours[x.getDay()]) ? 'off' : ''}" data-d="${d}">
+      <span>${x.toLocaleDateString('ru-RU', { weekday: 'short' })}</span><b>${x.getDate()}</b>${hol[d] ? `<i>${esc(hol[d])}</i>` : ''}</div>`;
+  }).join('');
+  const ad = days.map((d) => `<div class="gw-ad" data-d="${d}">${allDay.filter((e) => e.date === d).map((e) => evHtml(e)).join('')}</div>`).join('');
+  const cols = days.map((d) => {
+    const x = dOf(d);
+    const h = hol[d] ? null : hours[x.getDay()];
+    // нерабочее время приглушаем, выходной — штриховка, как в старом расписании
+    let shade = '';
+    if (Array.isArray(h)) {
+      const a = (toMin(h[0]) ?? 0) - minH * 60, b = (toMin(h[1]) ?? 1440) - minH * 60;
+      if (a > 0) shade += `<div class="gw-off" style="top:0;height:${a / 60 * HOUR_PX}px"></div>`;
+      if (b < H * 60) shade += `<div class="gw-off" style="top:${b / 60 * HOUR_PX}px;bottom:0"></div>`;
+    }
+    // как в Google: длинные события (заказы) делят ширину между собой, а короткие
+    // (звонки, задачи) ложатся поверх справа и не сжимают заказ в полоску
+    const dayEv = timed.filter((e) => e.date === d);
+    const long = layoutDay(dayEv.filter((e) => (e.dur || 30) >= 45));
+    const short = layoutDay(dayEv.filter((e) => (e.dur || 30) < 45));
+    const place = (x, from = 0) => {
+      const top = (x.s - minH * 60) / 60 * HOUR_PX;
+      const ht = Math.max(19, (x.e.dur || 30) / 60 * HOUR_PX - 2);
+      const w = `(100% - ${from}%)`;
+      return evHtml(x.e, `top:${top}px;height:${ht}px;left:calc(${from}% + ${x.lane} * ${w} / ${x.lanes});width:calc(${w} / ${x.lanes} - 3px)${from ? ';z-index:3' : ''}`, ht < 36);
+    };
+    const evs = long.map((x) => place(x)).join('')
+      + short.map((x) => place(x, long.some((y) => y.s < x.f && x.s < y.f) ? 35 : 0)).join('');
+    const now = new Date();
+    const line = d === today && now.getHours() >= minH && now.getHours() < maxH
+      ? `<div class="gw-now" style="top:${((now.getHours() - minH) * 60 + now.getMinutes()) / 60 * HOUR_PX}px"></div>` : '';
+    return `<div class="gw-col ${Array.isArray(h) ? '' : 'off'} ${d === today ? 'today' : ''}" data-d="${d}">${shade}${evs}${line}</div>`;
+  }).join('');
+  const gut = Array.from({ length: H }, (_, i) => `<div class="gw-hr" style="top:${i * HOUR_PX}px">${i ? hm((minH + i) * 60) : ''}</div>`).join('');
+
+  root.innerHTML = `<div class="gw ${calView}" style="--n:${days.length};--hpx:${HOUR_PX}px">
+    <div class="gw-row gw-head"><div class="gw-gut"></div>${head}</div>
+    <div class="gw-row gw-allday"><div class="gw-gut">весь<br>день</div>${ad}</div>
+    <div class="gw-body" id="gw-body"><div class="gw-row gw-grid" style="height:${H * HOUR_PX}px">
+      <div class="gw-gut">${gut}</div>${cols}</div></div></div>`;
+
+  const body = $('#gw-body');
+  if (keepScroll != null) body.scrollTop = keepScroll;
+  else {
+    // открываем с начала рабочего дня или с самого раннего события — чтобы ничего не было срезано сверху
+    const first = Math.min(8, ...timed.filter((e) => days.includes(e.date)).map((e) => Math.floor(e.start / 60)));
+    body.scrollTop = Math.max(0, first - minH) * HOUR_PX;
+  }
+  bindCalEvents(root);
+  $$('.gw-dh', root).forEach((x) => x.onclick = () => { calDate = x.dataset.d; calView = 'day'; store('calView', calView); renderCal(); });
+  // клик по пустому месту сетки — новая уборка на этот день и час
+  $$('.gw-col', root).forEach((c) => c.addEventListener('click', (ev) => {
+    if (ev.target.closest('.ge')) return;
+    const y = ev.clientY - c.getBoundingClientRect().top;
+    const m = minH * 60 + Math.floor(y / HOUR_PX * 2) * 30;
+    openJob({ date: c.dataset.d, time: hm(m) });
+  }));
+  $$('.gw-ad', root).forEach((c) => c.addEventListener('click', (ev) => { if (!ev.target.closest('.ge')) openJob({ date: c.dataset.d }); }));
+}
+
+function renderMonth(root) {
+  const [from] = calRange();
+  const today = iso(new Date());
+  const month = calDate.slice(0, 7);
+  const hours = state.work_hours || {};
+  const hol = Object.fromEntries(calData.holidays.map((h) => [h.date, h.name]));
+  const vis = calVisible();
+  const head = Array.from({ length: 7 }, (_, i) => `<div class="gm-wd">${dOf(addD(from, i)).toLocaleDateString('ru-RU', { weekday: 'short' })}</div>`).join('');
+  const cells = Array.from({ length: 42 }, (_, i) => {
+    const d = addD(from, i);
+    const evs = vis.filter((e) => e.date === d);
+    const off = hol[d] || !Array.isArray(hours[dOf(d).getDay()]);
+    const shown = evs.slice(0, 3).map((e) => `<div class="gm-ev l-${e.layer} ${e.late ? 'late' : ''}" data-k="${esc(e.key)}" style="--c:${layerOf(e.layer).c}">
+        <i></i>${e.start != null ? `<s>${hm(e.start)}</s>` : ''}<span dir="auto">${esc(evTitle(e))}</span></div>`).join('');
+    return `<div class="gm-c ${d.slice(0, 7) !== month ? 'out' : ''} ${d === today ? 'today' : ''} ${off ? 'off' : ''}" data-d="${d}">
+      <button class="gm-n" data-d="${d}">${Number(d.slice(8))}</button>${hol[d] ? `<em>${esc(hol[d])}</em>` : ''}
+      ${shown}${evs.length > 3 ? `<button class="gm-more" data-d="${d}">ещё ${evs.length - 3}</button>` : ''}</div>`;
+  }).join('');
+  root.innerHTML = `<div class="gm"><div class="gm-head">${head}</div><div class="gm-grid">${cells}</div></div>`;
+  bindCalEvents(root);
+  $$('.gm-n, .gm-more', root).forEach((x) => x.onclick = (ev) => { ev.stopPropagation(); calDate = x.dataset.d; calView = 'day'; store('calView', calView); renderCal(); });
+  $$('.gm-c', root).forEach((c) => c.addEventListener('click', (ev) => { if (!ev.target.closest('.gm-ev')) openJob({ date: c.dataset.d }); }));
+}
+
+function bindCalEvents(root) {
+  $$('[data-k]', root).forEach((x) => x.onclick = (ev) => {
+    ev.stopPropagation();
+    const e = calData.events.find((y) => y.key === x.dataset.k);
+    if (!e) return;
+    if (e.manual) openJob({ kind: 'manual', id: e.job_id, date: e.date, time: e.time, name: e.name === 'Уборка' ? '' : e.name,
+      phone: e.phone, service: e.service, area: e.area, district: e.district, price: e.price, note: e.note });
+    else openConv(e.conv_id, true);
+  });
 }
 
 /* ───── уборка, заведённая руками ─────
@@ -1114,7 +1311,7 @@ const EDITABLE = [
   ['date_iso', 'Желаемая дата', 'date'],
   ['time', 'Желаемое время', 'text'],
   ['job_date', 'Записан на', 'date'],
-  ['job_time', 'Время записи', 'text'],
+  ['job_time', 'Время записи (09:00 или 08:00–14:00)', 'text'],
   ['source', 'Источник', 'text'],
   ['followup_at', 'Напомнить о себе', 'date'],
   ['followup_note', 'О чём напомнить', 'text'],

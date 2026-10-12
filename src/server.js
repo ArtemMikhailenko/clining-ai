@@ -28,6 +28,7 @@ import { ATTR_TITLE, PLATFORM_TITLE } from './attribution.js';
 import { localDate } from './schedule.js';
 import { SERVICES } from './leadnorm.js';
 import { syncCalendar, calendarStatus, startCalendar } from './gcal.js';
+import { calendarEvents } from './calendar.js';
 import { listManagers, saveManager, deleteManager, getManager, setManager, assignHandoff, clearCallDue,
   listCalls, logCall, saveRecording, sweepRecordings, overdueCalls, CALL_STATUS, recordingFile, deleteRecording,
   restoreRecording, purgeTrash, reassignOverdue, LANGS } from './calls.js';
@@ -586,6 +587,13 @@ app.get('/api/sources', (req, res) => {
 
 /** Заказы с назначенной датой — для календаря. */
 app.get('/api/holidays', (req, res) => res.json(holidays()));
+/* Календарь CRM: все события периода одним запросом */
+app.get('/api/calendar', (req, res) => {
+  const d = (v) => (/^\d{4}-\d{2}-\d{2}$/.test(String(v || '')) ? String(v) : null);
+  const from = d(req.query.from), to = d(req.query.to);
+  if (!from || !to || to < from) return res.status(400).json({ error: 'Нужны from и to в формате ГГГГ-ММ-ДД' });
+  res.json(calendarEvents(from, to));
+});
 
 const JOB_FIELDS = ['date', 'time', 'name', 'phone', 'service', 'area', 'district', 'price', 'note'];
 
