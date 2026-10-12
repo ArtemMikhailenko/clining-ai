@@ -953,12 +953,13 @@ function chatHtml(c) {
   return `<div class="chat-head">
       <div class="ava lg">${esc(initials(c.name, c.phone))}</div>
       <div class="t"><b dir="auto">${esc(c.name || 'Без имени')}</b><span>+${esc(c.phone)}</span></div>
-      ${chipFor(c)}<div class="grow"></div>
+      <div class="grow"></div>
       ${c.ai_enabled ? '<button class="btn warn" data-a="takeover">Перехватить</button>'
                      : '<button class="btn primary" data-a="giveback">Вернуть ИИ</button>'}
       <button class="btn" data-a="card">Карточка</button>
       <button class="btn ghost" data-a="close">${c.status === 'closed' ? 'Открыть' : 'Закрыть'}</button>
     </div>
+    <div class="chat-chips">${chipFor(c)}</div>
     ${c.needs_human ? `<div class="alert">⚠ ${esc(c.handoff_reason || 'ИИ просит подключиться')}</div>` : ''}
     <div class="scroll" data-r="wrap"><div class="thread" data-r="thread"></div></div>
     <div class="composer"><div class="composer-box">
