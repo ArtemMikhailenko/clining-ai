@@ -27,7 +27,7 @@ import { syncMeta, metaStatus, startMeta, accountId as metaAccount } from './met
 import { ATTR_TITLE, PLATFORM_TITLE } from './attribution.js';
 import { localDate } from './schedule.js';
 import { SERVICES } from './leadnorm.js';
-import { syncCalendar, calendarStatus, startCalendar } from './gcal.js';
+import { syncCalendar, calendarStatus, startCalendar, doneExternal } from './gcal.js';
 import { calendarEvents } from './calendar.js';
 import { listManagers, saveManager, deleteManager, getManager, setManager, assignHandoff, clearCallDue,
   listCalls, logCall, saveRecording, sweepRecordings, overdueCalls, CALL_STATUS, recordingFile, deleteRecording,
@@ -835,6 +835,11 @@ app.get('/api/meta/status', (req, res) => res.json(metaStatus()));
 /* Google Календарь: проверка доступа и синхронизация по кнопке */
 app.get('/api/gcal/status', async (req, res) => {
   try { res.json(await calendarStatus()); } catch (e) { res.status(400).json({ error: e.message }); }
+});
+// «Сделано» у напоминания, заведённого в Google: удаляем событие из календаря.
+// Это работа менеджера, а не настройка, — путь вне /api/gcal/, который только для владельца
+app.post('/api/gcal-done/:id', async (req, res) => {
+  try { await doneExternal(String(req.params.id)); res.json({ ok: true }); } catch (e) { res.status(400).json({ error: e.message }); }
 });
 app.post('/api/gcal/sync', async (req, res) => {
   try { res.json(await syncCalendar()); } catch (e) { res.status(400).json({ error: e.message }); }

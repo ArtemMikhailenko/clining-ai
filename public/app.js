@@ -557,7 +557,8 @@ const CAL_LAYERS = [
   { k: 'task', t: 'Задачи', c: 'var(--s2)' },
   { k: 'wish', t: 'Хотят, но не записаны', c: 'var(--s4)' },
   { k: 'follow', t: 'Напоминания', c: 'var(--s5)' },
-  { k: 'bot', t: 'Бот напишет клиенту', c: 'var(--muted)' }
+  { k: 'bot', t: 'Бот напишет клиенту', c: 'var(--muted)' },
+  { k: 'google', t: 'Из Google Календаря', c: 'var(--accent)' }
 ];
 const store = (k, v) => { try { localStorage.setItem(k, typeof v === 'string' ? v : JSON.stringify(v)); } catch {} };
 const stored = (k, def) => { try { const v = localStorage.getItem(k); return v == null ? def : v; } catch { return def; } };
@@ -565,7 +566,8 @@ let calView = stored('calView', matchMedia('(max-width:860px)').matches ? 'day' 
 let calDate = iso(new Date());
 let calMini = calDate.slice(0, 7);
 let calWho = stored('calWho', '');
-let calLayers = (() => { try { return { job: 1, wish: 1, call: 1, task: 1, follow: 1, bot: 0, ...JSON.parse(stored('calLayers', '{}')) }; } catch { return { job: 1, wish: 1, call: 1, task: 1, follow: 1, bot: 0 }; } })();
+let calLayers = (() => { const d = { job: 1, wish: 1, call: 1, task: 1, follow: 1, bot: 0, google: 1 };
+  try { return { ...d, ...JSON.parse(stored('calLayers', '{}')) }; } catch { return d; } })();
 let calData = { events: [], holidays: [] };
 
 const dOf = (s) => new Date(Number(s.slice(0, 4)), Number(s.slice(5, 7)) - 1, Number(s.slice(8, 10)));
@@ -602,14 +604,16 @@ function calVisible() {
   const meId = me().id;
   return calData.events.filter((e) => calLayers[e.layer]
     && (!calWho || (calWho === 'mine' ? e.manager_id === meId : e.manager_id === Number(calWho))
-      || (e.layer === 'job' && e.manual)));
+      || (e.layer === 'job' && e.manual) || e.layer === 'google'));
 }
 const layerOf = (k) => CAL_LAYERS.find((l) => l.k === k);
 function evTitle(e) {
-  if (e.layer === 'job' || e.layer === 'wish') return e.name;
+  if (e.group) return e.name;
+  if (e.layer === 'job' || e.layer === 'wish' || e.layer === 'google') return e.name;
   return `${e.what} — ${e.name}`;
 }
 function evSub(e) {
+  if (e.layer === 'google') return [e.district, 'Google'].filter(Boolean).join(' · ');
   if (e.layer === 'job' || e.layer === 'wish') return [e.service, e.area && e.area + ' м²', e.district].filter(Boolean).join(' · ');
   return e.who || '';
 }
@@ -674,6 +678,26 @@ function renderCalSide() {
     calView === 'month' ? renderMonth($('#gc-main')) : renderWeek($('#gc-main'), $('#gw-body')?.scrollTop); renderCalSide();
   });
   $('#cal-who') && ($('#cal-who').onchange = (e) => { calWho = e.target.value; store('calWho', calWho); renderCal(); });
+}
+
+/**
+ * Неделя: несколько звонков на одно время (например, пять просроченных на 8:05)
+ * не помещаются в колонку — собираем их в одну плашку «5 звонков», клик открывает день.
+ */
+function groupShort(list, day) {
+  const short = list.filter((e) => (e.dur || 30) < 45);
+  const bySlot = new Map();
+  for (const e of short) { const k = Math.floor(e.start / 30); bySlot.set(k, [...(bySlot.get(k) || []), e]); }
+  const out = list.filter((e) => (e.dur || 30) >= 45);
+  for (const [k, g] of bySlot) {
+    if (g.length < 3) { out.push(...g); continue; }
+    const calls = g.filter((e) => e.layer === 'call').length;
+    out.push({ layer: calls === g.length ? 'call' : 'task', key: `grp:${day}:${k}`, group: true, date: day, start: Math.min(...g.map((e) => e.start)),
+      dur: 25, late: g.some((e) => e.late),
+      name: calls === g.length ? `${g.length} ${plural(g.length, 'звонок', 'звонка', 'звонков')}` : `${g.length} ${plural(g.length, 'задача', 'задачи', 'задач')}`,
+      what: '' });
+  }
+  return out;
 }
 
 /** Пересекающиеся по времени события делят ширину колонки, как в Google. */
@@ -746,7 +770,7 @@ function renderWeek(root, keepScroll) {
     }
     // как в Google: длинные события (заказы) делят ширину между собой, а короткие
     // (звонки, задачи) ложатся поверх справа и не сжимают заказ в полоску
-    const dayEv = timed.filter((e) => e.date === d);
+    const dayEv = calView === 'week' ? groupShort(timed.filter((e) => e.date === d), d) : timed.filter((e) => e.date === d);
     const long = layoutDay(dayEv.filter((e) => (e.dur || 30) >= 45));
     const short = layoutDay(dayEv.filter((e) => (e.dur || 30) < 45));
     const place = (x, from = 0) => {
@@ -816,8 +840,10 @@ function renderMonth(root) {
 function bindCalEvents(root) {
   $$('[data-k]', root).forEach((x) => x.onclick = (ev) => {
     ev.stopPropagation();
+    if (x.dataset.k.startsWith('grp:')) { calDate = x.dataset.k.split(':')[1]; calView = 'day'; store('calView', calView); renderCal(); return; }
     const e = calData.events.find((y) => y.key === x.dataset.k);
     if (!e) return;
+    if (e.layer === 'google') { if (e.link) window.open(e.link, '_blank', 'noopener'); return; }
     if (e.manual) openJob({ kind: 'manual', id: e.job_id, date: e.date, time: e.time, name: e.name === 'Уборка' ? '' : e.name,
       phone: e.phone, service: e.service, area: e.area, district: e.district, price: e.price, note: e.note });
     else openConv(e.conv_id, true);
@@ -2170,7 +2196,7 @@ async function updateTasksBadge() {
 }
 let tasksWho = 'all';     // all | mine
 let tasksKind = 'all';
-const TASK_KIND = { call: 'Позвонить', task: 'Действие', bot: 'Бот напишет', job: 'Уборка', pay: 'Оплата' };
+const TASK_KIND = { call: 'Позвонить', task: 'Действие', bot: 'Бот напишет', job: 'Уборка', pay: 'Оплата', google: 'Google' };
 const TASK_BUCKET = { late: 'Просрочено', today: 'Сегодня', tomorrow: 'Завтра', week: 'На этой неделе', later: 'Позже', nodate: 'Без срока' };
 
 function tasksTools() {
@@ -2199,6 +2225,9 @@ async function renderTasks() {
 
   const when = (t) => {
     if (!t.day) return '';
+    // у напоминаний из Google время уже местное
+    if (t.at_local) return t.timed ? (t.day === data.today ? t.at.slice(11) : new Date(t.day + 'T12:00:00Z').toLocaleDateString('ru-RU', { weekday: 'short', day: '2-digit', month: '2-digit' }) + ' ' + t.at.slice(11))
+      : new Date(t.day + 'T12:00:00Z').toLocaleDateString('ru-RU', { weekday: 'short', day: 'numeric', month: 'short' });
     if (t.timed && t.at) return t.bucket === 'today' || t.bucket === 'late' && t.day === data.today ? hhmm(t.at) : dayTime(t.at);
     const d = new Date(t.day + 'T12:00:00Z');
     return d.toLocaleDateString('ru-RU', { weekday: 'short', day: 'numeric', month: 'short' });
@@ -2208,20 +2237,31 @@ async function renderTasks() {
 
   $('#tk').innerHTML = groups.length ? groups.map(([b, list]) => `<section class="tk-g ${b}">
       <h3>${TASK_BUCKET[b]} <span>${list.length}</span></h3>
-      <div class="tk-list">${list.map((t) => `<div class="tk-row tk-${t.kind} ${t.late ? 'late' : ''}" data-conv="${t.conv_id}">
+      <div class="tk-list">${list.map((t) => `<div class="tk-row tk-${t.kind} ${t.late ? 'late' : ''}" data-conv="${t.conv_id || ''}" data-link="${esc(t.link || '')}">
         <span class="tk-when">${esc(when(t))}</span>
         <span class="tk-kind tk-k-${t.kind}">${TASK_KIND[t.kind]}</span>
         <span class="tk-what"><b dir="auto">${esc(t.what)}</b>
-          <small dir="auto">${esc(t.name || '+' + t.phone)}${t.name ? ' · +' + esc(t.phone) : ''}${t.district ? ' · ' + esc(t.district) : ''} · ${esc(stage(t))}</small></span>
+          <small dir="auto">${t.kind === 'google' ? `заведено в Google Календаре${t.district ? ' · ' + esc(t.district) : ''}`
+            : `${esc(t.name || '+' + t.phone)}${t.name ? ' · +' + esc(t.phone) : ''}${t.district ? ' · ' + esc(t.district) : ''} · ${esc(stage(t))}`}</small></span>
         <span class="tk-who">${esc(t.who || '—')}</span>
-        <span class="tk-act">${t.kind === 'task' ? `<button class="btn sm" data-done="${t.conv_id}">Сделано</button>` : ''}</span>
+        <span class="tk-act">${t.kind === 'task' ? `<button class="btn sm" data-done="${t.conv_id}">Сделано</button>`
+          : t.kind === 'google' ? `<button class="btn sm" data-gdone="${esc(t.event_id)}">Сделано</button>` : ''}</span>
       </div>`).join('')}</div></section>`).join('')
     : `<div class="empty" style="padding:60px 20px">${tasksWho === 'mine' ? 'У вас задач нет' : 'Запланированных задач нет'}</div>`;
 
   $$('#tk .tk-row').forEach((r) => r.onclick = (e) => {
     if (e.target.closest('button')) return;
+    if (!r.dataset.conv) { if (r.dataset.link) window.open(r.dataset.link, '_blank', 'noopener'); return; }
     current = Number(r.dataset.conv);
     go('inbox');
+  });
+  $$('#tk [data-gdone]').forEach((b) => b.onclick = async () => {
+    b.disabled = true;
+    try {
+      await api(`/api/gcal-done/${encodeURIComponent(b.dataset.gdone)}`, { method: 'POST', body: '{}' });
+      toast('Отмечено — событие убрано из Google Календаря');
+      renderTasks();
+    } catch (e) { b.disabled = false; toast(e.message, true); }
   });
   $$('#tk [data-done]').forEach((b) => b.onclick = async () => {
     try {

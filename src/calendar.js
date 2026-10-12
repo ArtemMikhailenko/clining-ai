@@ -86,6 +86,13 @@ export function calendarEvents(from, to) {
     }
   }
 
+  // события, которые завели прямо в Google Календаре
+  for (const g of db.prepare('SELECT * FROM gcal_external WHERE date >= ? AND date <= ?').all(from, to)) {
+    out.push({ layer: 'google', key: 'g:' + g.event_id, event_id: g.event_id, cal: g.cal, date: g.date,
+      start: g.start_min, dur: g.start_min == null ? null : g.dur, name: g.summary, what: g.summary,
+      district: g.location || '', note: g.description || '', link: g.link });
+  }
+
   const holidays = [];
   for (let d = from; d <= to; d = addDays(d, 1)) { const h = isHoliday(d); if (h) holidays.push({ date: d, name: h.name || h }); }
   out.sort((a, b) => a.date.localeCompare(b.date) || (a.start ?? -1) - (b.start ?? -1));

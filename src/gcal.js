@@ -11,9 +11,10 @@
  * Отдельная библиотека не нужна: токен — это JWT, подписанный ключом из JSON.
  */
 import crypto from 'node:crypto';
-import { db, getSetting, setSetting } from './db.js';
-import { scheduleSetting, localDate } from './schedule.js';
-import { getManager } from './calls.js';
+import { db, getSetting, setSetting, audit } from './db.js';
+import { scheduleSetting, localDate, localClock } from './schedule.js';
+import { getManager, sqlTime } from './calls.js';
+import { setNext } from './control.js';
 import { adminLink } from './notify.js';
 import { logFailure } from './integrations.js';
 
@@ -184,11 +185,15 @@ let running = false;
 export async function syncCalendar() {
   if (running || !gcalConfigured() || getSetting('gcal_on') !== '1') return { skipped: true };
   running = true;
-  const done = { created: 0, updated: 0, deleted: 0 };
+  const done = { created: 0, updated: 0, deleted: 0, from_google: 0 };
   try {
     const cals = calendars();
     const today = localDate();
     const from = addDays(today, -BACK_DAYS), to = addDays(today, AHEAD_DAYS);
+    // сначала читаем календари: переносы и удаления в Google применяются к CRM,
+    // и только потом CRM отправляет свою версию — иначе она затёрла бы правку
+    for (const [kind, calId] of Object.entries(cals)) if (calId) await pull(kind, calId, from, to, done);
+
     const want = new Map([...jobEvents(from, to), ...taskEvents(from, to)]
       .filter((e) => cals[e.cal]).map((e) => [e.key, { ...e, calId: cals[e.cal] }]));
     const have = new Map(db.prepare('SELECT * FROM gcal_events').all().map((r) => [r.key, r]));
@@ -211,6 +216,9 @@ export async function syncCalendar() {
       }
       if (!ev) { ev = await api('POST', `/calendars/${enc(w.calId)}/events`, w.body); done.created++; }
       save.run(key, w.calId, ev.id, hash, w.day);
+      // запоминаем версию Google и отправленное время: правку в календаре отличим от своей
+      db.prepare('UPDATE gcal_events SET g_updated=?, sent=? WHERE key=?')
+        .run(ev.updated || null, JSON.stringify({ start: w.body.start, end: w.body.end }), key);
     }
 
     for (const [key, h] of have) {
@@ -231,6 +239,134 @@ export async function syncCalendar() {
   } finally {
     running = false;
   }
+}
+
+/* ─────────── из Google в CRM ─────────── */
+
+async function listEvents(calId, from, to) {
+  const out = [];
+  let page = '';
+  do {
+    const q = new URLSearchParams({ timeMin: addDays(from, -1) + 'T00:00:00Z', timeMax: addDays(to, 2) + 'T00:00:00Z',
+      singleEvents: 'true', maxResults: '2500', ...(page ? { pageToken: page } : {}) });
+    const r = await api('GET', `/calendars/${enc(calId)}/events?${q}`);
+    out.push(...(r.items || []));
+    page = r.nextPageToken || '';
+  } while (page);
+  return out;
+}
+
+const hm = (m) => `${pad(Math.floor(m / 60))}:${pad(m % 60)}`;
+/** Начало и конец события из Google: точный момент или дата на весь день. */
+function whenOf(ev) {
+  if (ev.start?.dateTime) {
+    const a = new Date(ev.start.dateTime), b = new Date(ev.end?.dateTime || ev.start.dateTime);
+    const pa = localClock(a), pb = localClock(b);
+    return { at: a, end: b, date: pa?.date || localDate(a), min: pa?.min ?? null, endMin: pb?.date === pa?.date ? pb?.min : 1440 };
+  }
+  return ev.start?.date ? { at: null, date: ev.start.date, min: null } : null;
+}
+/** То же время, что мы отправляли? Сравниваем моменты, а не строки: Google меняет формат. */
+function sameTime(sent, ev) {
+  const t = (x) => (x?.dateTime ? Date.parse(x.dateTime) : x?.date || null);
+  return t(sent?.start) === t(ev.start) && t(sent?.end) === t(ev.end);
+}
+
+/**
+ * Событие CRM передвинули в Google — переносим срок в карточку. Название и
+ * описание не трогаем: их CRM пишет сама и при следующей отправке вернёт.
+ */
+function applyMove(key, ev, w) {
+  const [kind, a, b] = key.split(':');
+  const actor = 'Google Календарь';
+  if (kind === 'call' || kind === 'next') {
+    if (!w.at) return false;   // звонок с точным временем не превращаем в «весь день»
+    const col = kind === 'call' ? 'call_due_at' : 'next_action_at';
+    const c = db.prepare(`SELECT ${col} v FROM conversations WHERE id=?`).get(Number(a));
+    if (!c || !c.v) return false;
+    const v = sqlTime(w.at);
+    if (v === c.v) return false;
+    db.prepare(`UPDATE conversations SET ${col}=?${kind === 'call' ? ', call_escalated_at=NULL' : ', next_action_notified_at=NULL'} WHERE id=?`).run(v, Number(a));
+    audit('lead', Number(a), col, c.v, v, actor, 'перенесено в календаре');
+    return true;
+  }
+  if (kind === 'follow') {
+    const c = db.prepare('SELECT followup_at v FROM conversations WHERE id=?').get(Number(a));
+    if (!c || !c.v || c.v === w.date) return false;
+    db.prepare('UPDATE conversations SET followup_at=? WHERE id=?').run(w.date, Number(a));
+    audit('lead', Number(a), 'followup_at', c.v, w.date, actor, 'перенесено в календаре');
+    return true;
+  }
+  if (kind === 'job') {
+    const time = w.min == null ? '' : hm(w.min) + (w.endMin > w.min ? '–' + hm(w.endMin) : '');
+    if (a === 'conv') {
+      const c = db.prepare('SELECT job_date, job_time FROM conversations WHERE id=?').get(Number(b));
+      if (!c || (c.job_date === w.date && (c.job_time || '') === time)) return false;
+      db.prepare('UPDATE conversations SET job_date=?, job_time=? WHERE id=?').run(w.date, time || null, Number(b));
+      audit('lead', Number(b), 'job_date', `${c.job_date} ${c.job_time || ''}`.trim(), `${w.date} ${time}`.trim(), actor, 'перенесено в календаре');
+      return true;
+    }
+    const j = db.prepare('SELECT date, time FROM jobs WHERE id=?').get(Number(b));
+    if (!j || (j.date === w.date && (j.time || '') === time)) return false;
+    db.prepare('UPDATE jobs SET date=?, time=? WHERE id=?').run(w.date, time || null, Number(b));
+    return true;
+  }
+  return false;
+}
+
+async function pull(kind, calId, from, to, done) {
+  const items = await listEvents(calId, from, to);
+  const ours = new Map(db.prepare('SELECT * FROM gcal_events WHERE calendar_id=?').all(calId).map((r) => [r.event_id, r]));
+  const seen = new Set();
+  const external = [];
+  for (const ev of items) {
+    if (ev.status === 'cancelled') continue;
+    seen.add(ev.id);
+    const row = ours.get(ev.id);
+    if (!row) { external.push(ev); continue; }
+    if (!row.g_updated) {   // событие отправили до двусторонней связи — просто запоминаем версию
+      db.prepare('UPDATE gcal_events SET g_updated=? WHERE key=?').run(ev.updated, row.key);
+      continue;
+    }
+    if (ev.updated === row.g_updated) continue;
+    let sent = null;
+    try { sent = JSON.parse(row.sent || 'null'); } catch {}
+    const w = whenOf(ev);
+    if (w && sent && !sameTime(sent, ev) && applyMove(row.key, ev, w)) done.from_google++;
+    // правка учтена; hash сбрасываем, чтобы CRM отправила событие в своём виде
+    db.prepare("UPDATE gcal_events SET g_updated=?, hash='' WHERE key=?").run(ev.updated, row.key);
+  }
+  // удалили в Google: задачу и напоминание считаем выполненными; звонок и заказ
+  // так не отменяются — звонок закрывается записью результата, заказ не должен
+  // пропасть от случайного удаления. Их CRM создаст заново.
+  for (const [id, row] of ours) {
+    if (seen.has(id) || !row.day || row.day < from || row.day > to) continue;
+    const [k, convId] = row.key.split(':');
+    if (k === 'next' || k === 'follow') {
+      setNext(Number(convId), { done: true }, 'Google Календарь');
+      db.prepare('DELETE FROM gcal_events WHERE key=?').run(row.key);
+      done.from_google++;
+    }
+  }
+  // своё событие в календаре — показываем в CRM как есть
+  db.prepare('DELETE FROM gcal_external WHERE cal=?').run(kind);
+  const ins = db.prepare(`INSERT OR REPLACE INTO gcal_external(event_id, cal, summary, location, description, date, start_min, dur, link, updated)
+    VALUES (?,?,?,?,?,?,?,?,?,?)`);
+  for (const ev of external) {
+    const w = whenOf(ev);
+    if (!w) continue;
+    ins.run(ev.id, kind, ev.summary || '(без названия)', ev.location || '', ev.description || '', w.date, w.min,
+      w.min == null ? null : Math.max(15, Math.round((w.end - w.at) / 6e4)), ev.htmlLink || '', ev.updated || '');
+  }
+}
+
+/** «Сделано» в CRM у события из Google — удаляем его из календаря. */
+export async function doneExternal(eventId) {
+  const r = db.prepare('SELECT * FROM gcal_external WHERE event_id=?').get(eventId);
+  if (!r) throw new Error('Нет такого события');
+  const calId = calendars()[r.cal];
+  await api('DELETE', `/calendars/${enc(calId)}/events/${enc(eventId)}`).catch((e) => { if (![404, 410].includes(e.status)) throw e; });
+  db.prepare('DELETE FROM gcal_external WHERE event_id=?').run(eventId);
 }
 
 /** Проверка из настроек: ключ принят, оба календаря видны и в них можно писать. */

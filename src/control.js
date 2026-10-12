@@ -327,9 +327,22 @@ export function tasksList() {
       at: j.date + (j.time ? ' ' + j.time : ''), timed: false, day: j.date, who: who(j.manager_id), manager_id: j.manager_id });
   }
 
+  // напоминания, которые завели прямо в Google Календаре «Напоминания»
+  for (const g of db.prepare("SELECT * FROM gcal_external WHERE cal='task'").all()) {
+    const timed = g.start_min != null;
+    items.push({ kind: 'google', event_id: g.event_id, link: g.link, conv_id: null, name: '', phone: '', district: g.location || '',
+      what: g.summary, timed, day: g.date,
+      at: timed ? `${g.date} ${String(Math.floor(g.start_min / 60)).padStart(2, '0')}:${String(g.start_min % 60).padStart(2, '0')}` : g.date,
+      at_local: true, who: 'Google Календарь', manager_id: null });
+  }
+
   const now = Date.now();
+  const lc = localClock();
+  const nowLocal = `${today} ${String(Math.floor((lc?.min ?? 0) / 60)).padStart(2, '0')}:${String((lc?.min ?? 0) % 60).padStart(2, '0')}`;
   for (const it of items) {
-    it.late = it.timed ? Boolean(it.at && parse(it.at) <= now) : Boolean(it.day && it.day < today && it.kind !== 'job');
+    // у событий из Google время уже местное, у остального — UTC из базы
+    it.late = it.at_local ? (it.timed ? it.at <= nowLocal : it.day < today)
+      : it.timed ? Boolean(it.at && parse(it.at) <= now) : Boolean(it.day && it.day < today && it.kind !== 'job');
     it.bucket = !it.day ? 'nodate' : it.late || it.day < today ? 'late'
       : it.day === today ? 'today' : it.day === addDays(today, 1) ? 'tomorrow'
       : it.day <= addDays(today, 7) ? 'week' : 'later';

@@ -552,6 +552,24 @@ db.exec(`CREATE TABLE IF NOT EXISTS gcal_events (
   day         TEXT,
   updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 )`);
+// двусторонняя связь: что именно отправили и какую версию события Google вернул —
+// по ним видно, что событие поменяли в самом календаре
+const gcCols = db.prepare('PRAGMA table_info(gcal_events)').all().map((c) => c.name);
+if (!gcCols.includes('g_updated')) {
+  db.exec('ALTER TABLE gcal_events ADD COLUMN g_updated TEXT');
+  db.exec('ALTER TABLE gcal_events ADD COLUMN sent TEXT');
+}
+// события, которые завели прямо в Google Календаре: CRM их показывает, но не владеет ими
+db.exec(`CREATE TABLE IF NOT EXISTS gcal_external (
+  event_id  TEXT PRIMARY KEY,
+  cal       TEXT NOT NULL,               -- job | task: из какого календаря
+  summary   TEXT, location TEXT, description TEXT,
+  date      TEXT NOT NULL,               -- местная дата начала
+  start_min INTEGER,                     -- минуты от полуночи; пусто — на весь день
+  dur       INTEGER,
+  link      TEXT,
+  updated   TEXT
+)`);
 seed.run('gcal_on', '0');
 seed.run('gcal_jobs_id', '');
 seed.run('gcal_tasks_id', '');
