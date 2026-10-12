@@ -2295,7 +2295,7 @@ async function loadGcalBox() {
     const cal = (k, t) => { const c = g.calendars[k]; return c ? `${t}: ${c.ok ? '✓ ' + esc(c.name || '') : '<span class="err">' + esc(c.error) + '</span>'}` : ''; };
     const bad = g.configured && (g.last_error || Object.values(g.calendars).some((c) => !c.ok && c.error !== 'не указан'));
     box.innerHTML = `<div class="meta-st ${!g.configured ? 'off' : bad ? 'bad' : 'ok'}">
-        <b>${!g.configured ? 'Не подключено: на сервере нет ключа' : bad ? 'Есть ошибка' : g.on ? 'Подключено' : 'Ключ на месте, синхронизация выключена'}</b>
+        <b>${!g.configured ? (g.has_env ? 'Ключ на сервере есть, но не читается — вставьте содержимое JSON-файла целиком, от { до }' : 'Не подключено: на сервере нет ключа (переменная GOOGLE_SERVICE_ACCOUNT)') : bad ? 'Есть ошибка' : g.on ? 'Подключено' : 'Ключ на месте, синхронизация выключена'}</b>
         ${g.email ? `<span>Сервисный аккаунт: <code>${esc(g.email)}</code> — его добавляют в доступ к календарям</span>` : ''}
         ${g.configured ? `<span>${[cal('job', 'Уборки'), cal('task', 'Напоминания')].filter(Boolean).join(' · ')}</span>
           <span>последняя синхронизация: ${when(g.last_sync)} · событий: ${g.events}</span>` : ''}

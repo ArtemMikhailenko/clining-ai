@@ -237,7 +237,9 @@ export async function syncCalendar() {
 export async function calendarStatus() {
   const a = account();
   const cals = calendars();
-  const res = { configured: Boolean(a), email: a?.email || '', on: getSetting('gcal_on') === '1',
+  const res = { configured: Boolean(a), email: a?.email || '',
+    // переменная есть, но JSON не читается — частая ошибка при копировании
+    has_env: Boolean(String(process.env.GOOGLE_SERVICE_ACCOUNT || '').trim()), on: getSetting('gcal_on') === '1',
     last_sync: getSetting('gcal_last_sync') || null, last_error: getSetting('gcal_error') || '',
     events: db.prepare('SELECT count(*) n FROM gcal_events').get().n, calendars: {} };
   if (!a) return res;
