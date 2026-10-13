@@ -485,7 +485,7 @@ const pempty = (text, icon) => `<div class="pempty">${icon ? ico(icon) : ''}${te
 function hbars(rows, color) {
   if (!rows.length) return pempty('нет данных');
   const max = Math.max(...rows.map((r) => r[1]));
-  return rows.map(([n, v], i) => `<div class="hb" style="--c:${color}"><span class="n" dir="auto">${esc(n)}</span>
+  return rows.map(([n, v], i) => `<div class="hb" style="--c:${color}"><span class="n"><bdi>${esc(n)}</bdi></span>
     <span class="track"><span class="fill" style="width:${Math.round(v / max * 100)}%;animation-delay:${i * 50}ms"></span></span>
     <span class="v">${v}</span></div>`).join('');
 }
@@ -609,8 +609,8 @@ function renderDash() {
       const d = new Date(j.date + 'T12:00:00');
       return `<div class="jrow" data-id="${j.id}" data-kind="${j.kind}">
         <span class="jdate ${j.date === today ? 'today' : ''}"><b>${d.getDate()}</b><span>${d.toLocaleDateString('ru-RU', { weekday: 'short' })}</span></span>
-        <div class="jtxt"><div class="jn" dir="auto">${esc(j.name || '+' + j.phone)}</div>
-          <div class="js" dir="auto">${esc([j.time, j.service, j.area && j.area + ' м²', j.district].filter(Boolean).join(' · '))}</div></div>
+        <div class="jtxt"><div class="jn"><bdi>${esc(j.name || '+' + j.phone)}</bdi></div>
+          <div class="js">${[j.time, j.service, j.area && j.area + ' м²', j.district].filter(Boolean).map((x) => `<bdi>${esc(x)}</bdi>`).join(' · ')}</div></div>
         ${j.price ? `<span class="jp">${esc(j.price)}</span>` : ''}
       </div>`;
     }).join('') : pempty('пока ничего не назначено', ICONS.cal))
