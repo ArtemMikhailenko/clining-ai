@@ -724,6 +724,12 @@ app.post('/api/conversations/:id/stage', (req, res) => {
     return res.status(400).json({ error: e.message });
   }
   db.prepare('UPDATE conversations SET review=NULL WHERE id=?').run(id);
+  // перенесли в «Работа выполнена» — запланированные работы по сделке тоже отмечаем выполненными
+  if (req.body.stage === 'done') {
+    for (const j of db.prepare("SELECT id FROM jobs WHERE conv_id=? AND status='planned'").all(id)) {
+      try { workDone(id, j.id); } catch (e) { console.error('работа выполнена:', e.message); }
+    }
+  }
   emit('conversations', null);
   res.json(getConversation(id));
 });

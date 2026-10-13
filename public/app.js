@@ -125,7 +125,8 @@ const plural = (n, a, b, c) => { const m = n % 100, k = n % 10;
 // уточнение, предложение / согласовано, выполнено) — на них держатся отчёт и контроль.
 const COLUMNS = [
   { k:'work',   t:'Дожимаем',     c:'var(--accent)', stages: ['new', 'clarify', 'offer'], hint:'уточняем, предлагаем цену, звоним — пока не закроем дату' },
-  { k:'agreed', t:'Дата закрыта', c:'var(--s3)',     stages: ['agreed', 'done'],          hint:'цена и дата согласованы — ждём уборку и оплату' }
+  { k:'agreed', t:'Дата закрыта', c:'var(--s3)',     stages: ['agreed'],                  hint:'цена и дата согласованы — ждём уборку' },
+  { k:'done',   t:'Работа выполнена', c:'var(--s1)',   stages: ['done'],                    hint:'уборка сделана — ждём оплату; оплатили — переносите в «Оплачено»' }
 ];
 // Закрытые сделки — по подстатусам. «Неквалифицировано» разбито на две
 // корзины, как просил менеджер; для отчёта это один подстатус.
@@ -1070,7 +1071,37 @@ function subLine(n) {
  * говорил «перенесено», сервер менял только стадию, флаг «нужен человек»
  * оставался — и карточка возвращалась на место. Теперь расхождение видно сразу.
  */
+/** Окно «Когда уборка?»: дата обязательна, время — по желанию (08:00–14:00). */
+function askJobDate(c) {
+  const dlg = $('#jd-dlg'), form = $('#jd-form');
+  if (!dlg) return Promise.resolve(null);
+  form.reset();
+  const l = lead(c || {});
+  form.elements.job_date.value = c?.job_date || (/^\d{4}-\d{2}-\d{2}$/.test(l.date_iso || '') ? l.date_iso : '');
+  form.elements.job_time.value = c?.job_time || l.time || '';
+  $('#jd-sub').textContent = `${c?.name || l.name || 'клиент'} — дата и время попадут в Расписание и Google Календарь`;
+  return new Promise((done) => {
+    const close = (v) => { dlg.close(); done(v); };
+    $('#jd-x').onclick = () => close(null);
+    $('#jd-cancel').onclick = () => close(null);
+    dlg.oncancel = () => done(null);
+    form.onsubmit = (e) => { e.preventDefault(); close({ job_date: form.elements.job_date.value, job_time: form.elements.job_time.value.trim() }); };
+    dlg.showModal();
+    form.elements.job_date.focus();
+  });
+}
+
 async function moveTo(id, key) {
+  // «Дата закрыта» без даты не бывает: спрашиваем число и время — запись сразу
+  // попадает в Расписание и в Google Календарь
+  const cur0 = convs.find((c) => c.id === id) || (detail?.id === id ? detail : null);
+  if (key === 'agreed' && !cur0?.job_date) {
+    const when = await askJobDate(cur0);
+    if (!when?.job_date) { toast('Без даты заявка остаётся на месте'); return false; }
+    try {
+      await api(`/api/conversations/${id}/lead`, { method: 'POST', body: JSON.stringify(when) });
+    } catch (e) { toast(e.message, true); return false; }
+  }
   let reason = null;
   if (key === 'lost') {
     // ТЗ §13: проигранная сделка без причины не закрывается — иначе нечего анализировать
@@ -1081,7 +1112,7 @@ async function moveTo(id, key) {
   // в «Дату закрыта» — согласовано
   const cur = convs.find((c) => c.id === id);
   const col = COLUMNS.find((x) => x.k === key);
-  const stage = !col ? key : col.stages.includes(cur?.stage) ? cur.stage : col.k === 'work' ? 'clarify' : 'agreed';
+  const stage = !col ? key : col.stages.includes(cur?.stage) ? cur.stage : col.k === 'work' ? 'clarify' : col.stages[0];
   const body = isArchive(key) ? { stage: 'closed', close: key, reason } : { stage };
   try {
     const updated = await api(`/api/conversations/${id}/stage`, { method: 'POST', body: JSON.stringify(body) });
@@ -1484,8 +1515,8 @@ function leadFormHtml(c) {
         ? `<select name="${k}">${opts.map((o) => `<option value="${esc(o)}" ${l[k] === o ? 'selected' : ''}>${o || '—'}</option>`).join('')}</select>`
         : `<input name="${k}" type="${type}" dir="auto" value="${esc(val(k))}">`}</label>`).join('')}
     <div class="lf-foot">
-      <button type="button" class="btn" data-a="lead-cancel">Отмена</button>
-      <button type="submit" class="btn primary">Сохранить</button>
+      <span class="autosave" data-r="saved">Изменения сохраняются сами</span>
+      <button type="button" class="btn primary" data-a="lead-cancel">Готово</button>
     </div>
   </form></div>`;
 }
@@ -2022,27 +2053,37 @@ function bindLead(root, convId) {
     bindLead(root, convId);
   };
   const cancel = root.querySelector('[data-a="lead-cancel"]');
-  if (cancel) cancel.onclick = () => { root.innerHTML = leadHtml(detail); bindLead(root, convId); };
-
-  const form = root.querySelector('[data-r="leadform"]');
-  if (form) form.onsubmit = async (e) => {
-    e.preventDefault();
-    const body = Object.fromEntries(new FormData(form).entries());
-    // источник — атрибуция рекламы: без причины сервер правку не примет
-    if ('source' in body && body.source.trim() !== String(detail.source || '')) {
-      const why = prompt('Почему меняете источник? Прежнее значение останется в истории');
-      if (!why) return;
-      body.source_reason = why;
-    }
-    try {
-      detail = { ...detail, ...(await api(`/api/conversations/${convId}/lead`, { method: 'POST', body: JSON.stringify(body) })) };
-      detail.messages = detail.messages || [];
-      root.innerHTML = leadHtml(detail);
-      bindLead(root, convId);
-      toast('Заявка обновлена');
-      loadList();
-    } catch (err) { toast(err.message, true); }
+  // «Готово» — дождаться сохранения поля, из которого только что ушли
+  if (cancel) cancel.onclick = async () => {
+    await new Promise((r) => setTimeout(r, 0));
+    await root.querySelector('[data-r="leadform"]')?._pending;
+    root.innerHTML = leadHtml(detail); bindLead(root, convId);
   };
+
+  // Каждое поле сохраняется само, как только его поменяли: кнопки «Сохранить» нет
+  const form = root.querySelector('[data-r="leadform"]');
+  if (form) {
+    const mark = (t, cls = '') => { const el = form.querySelector('[data-r="saved"]'); if (el) { el.textContent = t; el.className = 'autosave ' + cls; } };
+    const saveField = async (el) => {
+      if (!el.name) return;
+      const body = { [el.name]: el.value };
+      // источник — атрибуция рекламы: без причины сервер правку не примет
+      if (el.name === 'source' && el.value.trim() !== String(detail.source || '')) {
+        const why = prompt('Почему меняете источник? Прежнее значение останется в истории');
+        if (!why) { el.value = detail.source || ''; return; }
+        body.source_reason = why;
+      }
+      mark('Сохраняем…');
+      try {
+        detail = { ...detail, ...(await api(`/api/conversations/${convId}/lead`, { method: 'POST', body: JSON.stringify(body) })) };
+        detail.messages = detail.messages || [];
+        mark('Сохранено ✓', 'ok');
+        loadList();
+      } catch (err) { mark('Не сохранилось: ' + err.message, 'err'); toast(err.message, true); }
+    };
+    form.addEventListener('change', (e) => { form._pending = saveField(e.target); });
+    form.onsubmit = (e) => { e.preventDefault(); document.activeElement?.blur(); };
+  }
 }
 
 async function openConv(id, inDrawer) {

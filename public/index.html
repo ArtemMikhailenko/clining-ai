@@ -345,6 +345,9 @@ header .sub{color:var(--muted);font-size:12.5px;margin-top:2px;letter-spacing:0}
 .team-tbl td.good{color:var(--green);font-weight:560}.team-tbl td.bad{color:var(--danger);font-weight:560}.team-tbl td.zero{color:var(--muted)}
 .team-tbl small{display:block;font-size:11px;color:var(--muted);font-weight:400}
 .team-tbl tr.off td{opacity:.55}
+.leadform .autosave{font-size:12px;color:var(--muted);margin-right:auto;align-self:center}
+.leadform .autosave.ok{color:var(--green)}
+.leadform .autosave.err{color:var(--danger)}
 .jwish{margin-top:10px;font-size:12.5px;color:var(--text-2)}
 .jwish a{color:var(--warn)}
 .team-pool{margin-top:10px;font-size:12.5px;color:var(--text-2)}
@@ -1629,6 +1632,20 @@ button,a,.lrow,.card,.frow{-webkit-tap-highlight-color:transparent;touch-action:
   <div class="wa-body" id="wa-body"></div>
 </dialog>
 
+<dialog id="jd-dlg" class="sheet">
+  <div class="wa-top">
+    <span class="wa-ico job"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="17" rx="3"/><path d="M16 2.5v3M8 2.5v3M3 10h18"/></svg></span>
+    <div><h3>Когда уборка?</h3><p id="jd-sub">дата и время попадут в Расписание и Google Календарь</p></div>
+    <button class="icon-btn" id="jd-x" title="Закрыть" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+  </div>
+  <form class="wa-body jobform" id="jd-form">
+    <label class="lf"><span>Дата</span><input name="job_date" type="date" required></label>
+    <label class="lf"><span>Время</span><input name="job_time" type="text" placeholder="08:00–14:00"></label>
+    <div class="job-foot"><div class="grow"></div>
+      <button type="button" class="btn" id="jd-cancel">Отмена</button>
+      <button type="submit" class="btn primary">Записать</button></div>
+  </form>
+</dialog>
 <dialog id="job-dlg" class="sheet">
   <div class="wa-top">
     <span class="wa-ico job"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="17" rx="3"/><path d="M16 2.5v3M8 2.5v3M3 10h18"/></svg></span>
