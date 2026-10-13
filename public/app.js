@@ -313,6 +313,8 @@ function calTools() {
   return `<button class="btn" id="cal-today">Сегодня</button>
     <div class="seg"><button id="cal-prev" title="Назад">‹</button><button id="cal-next" title="Вперёд">›</button></div>
     <div class="seg" id="cal-view">${v('day', 'День')}${v('week', 'Неделя')}${v('month', 'Месяц')}</div>
+    <div class="seg" id="cal-preset">${Object.entries(CAL_PRESETS).map(([k, p]) =>
+      `<button data-pr="${k}" class="${calPreset() === k ? 'on' : ''}">${p.t}</button>`).join('')}</div>
     <button class="btn primary" id="cal-add">+ Уборка</button>`;
 }
 function dashTools() {
@@ -340,6 +342,7 @@ function bindTools() {
   $('#cal-next') && ($('#cal-next').onclick = () => calShift(1));
   $('#cal-today') && ($('#cal-today').onclick = () => { calDate = iso(new Date()); calMini = calDate.slice(0, 7); renderCal(); });
   $$('#cal-view button').forEach((b) => b.onclick = () => { calView = b.dataset.v; store('calView', calView); renderCal(); });
+  $$('#cal-preset button').forEach((b) => b.onclick = () => setCalPreset(b.dataset.pr));
   $('#cal-add') && ($('#cal-add').onclick = () => openJob({ date: iso(new Date()) }));
 }
 
@@ -645,6 +648,21 @@ let calWho = stored('calWho', '');
 let calLayers = (() => { const d = { job: 1, wish: 1, call: 1, task: 1, follow: 1, bot: 0, google: 1 };
   try { return { ...d, ...JSON.parse(stored('calLayers', '{}')) }; } catch { return d; } })();
 let calData = { events: [], holidays: [] };
+// Быстрый выбор того, что показывать, — те же галочки слева, только в один клик
+const CAL_PRESETS = {
+  all: { t: 'Всё', on: ['job', 'wish', 'call', 'task', 'follow', 'google'] },
+  jobs: { t: 'Заказы', on: ['job', 'wish'] },
+  tasks: { t: 'Задачи', on: ['call', 'task', 'follow', 'google'] }
+};
+function calPreset() {
+  const on = CAL_LAYERS.map((l) => l.k).filter((k) => calLayers[k] && k !== 'bot').sort().join();
+  return Object.keys(CAL_PRESETS).find((k) => [...CAL_PRESETS[k].on].sort().join() === on) || '';
+}
+function setCalPreset(k) {
+  for (const l of CAL_LAYERS) calLayers[l.k] = CAL_PRESETS[k].on.includes(l.k) ? 1 : 0;
+  store('calLayers', calLayers);
+  renderCal();
+}
 
 const dOf = (s) => new Date(Number(s.slice(0, 4)), Number(s.slice(5, 7)) - 1, Number(s.slice(8, 10)));
 const addD = (s, n) => { const d = dOf(s); d.setDate(d.getDate() + n); return iso(d); };
@@ -702,12 +720,27 @@ async function renderCal() {
   [calData, jobs] = await Promise.all([api(`/api/calendar?from=${from}&to=${to}`), api('/api/schedule')]);
   $('#pg-sub').textContent = calTitle();
   $$('#cal-view button').forEach((b) => b.classList.toggle('on', b.dataset.v === calView));
+  $$('#cal-preset button').forEach((b) => b.classList.toggle('on', b.dataset.pr === calPreset()));
   renderCalSide();
   if (calView === 'month') renderMonth(root); else renderWeek(root, keepScroll);
+  calEmptyHint(root);
 
   const upcoming = jobs.filter((j) => j.date >= iso(new Date()) && j.kind !== 'wish').length;
   const badge = $('#nav-cal');
   badge.textContent = upcoming; badge.classList.toggle('hidden', !upcoming);
+}
+
+/** Пусто на экране — объясняем почему и даём вернуть всё одной кнопкой. */
+function calEmptyHint(root) {
+  root.querySelector('.gc-empty')?.remove();
+  if (calVisible().length) return;
+  const off = !CAL_LAYERS.some((l) => calLayers[l.k] && l.k !== 'bot');
+  const why = off ? 'Не выбрано, что показывать — отметьте «Заказы» или «Задачи».'
+    : calWho ? `У менеджера «${esc(calWho === 'mine' ? 'вы' : mgrName(Number(calWho)))}» за этот период ничего нет.`
+    : calData.events.length ? 'Выбранные календари за этот период пусты.' : 'За этот период ничего не запланировано.';
+  root.insertAdjacentHTML('beforeend', `<div class="gc-empty"><span>${why}</span>${off || calWho || calData.events.length
+    ? '<button class="btn sm primary" id="cal-showall">Показать всё</button>' : ''}</div>`);
+  $('#cal-showall') && ($('#cal-showall').onclick = () => { calWho = ''; store('calWho', ''); setCalPreset('all'); });
 }
 
 function renderCalSide() {
@@ -752,6 +785,8 @@ function renderCalSide() {
   $$('[data-l]', side).forEach((x) => x.onchange = () => {
     calLayers[x.dataset.l] = x.checked ? 1 : 0; store('calLayers', calLayers);
     calView === 'month' ? renderMonth($('#gc-main')) : renderWeek($('#gc-main'), $('#gw-body')?.scrollTop); renderCalSide();
+    $$('#cal-preset button').forEach((b) => b.classList.toggle('on', b.dataset.pr === calPreset()));
+    calEmptyHint($('#gc-main'));
   });
   $('#cal-who') && ($('#cal-who').onchange = (e) => { calWho = e.target.value; store('calWho', calWho); renderCal(); });
 }
