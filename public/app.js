@@ -2082,6 +2082,8 @@ function closeDrawer() {
   drawerOpen = false;
   showLead(false);
   $('#drawer').classList.remove('on'); $('#scrim').classList.remove('on');
+  // в карточке могли отметить звонок или задачу — обновляем страницу под ней
+  if (['tasks', 'control', 'cal'].includes(page)) PAGES[page].render();
 }
 
 /* ───── контроль дня (ТЗ §8) ───── */
@@ -2154,8 +2156,7 @@ async function renderControl() {
   $$('#ctl [data-t]').forEach((b) => b.onclick = () => { ctrlTab = b.dataset.t; renderControl(); });
   $$('#ctl [data-open]').forEach((a) => a.onclick = (e) => {
     if (e.target.closest('audio, a[href]')) return;
-    current = Number(a.dataset.open);
-    go('inbox');
+    openConv(Number(a.dataset.open), true);
   });
 }
 
@@ -2299,7 +2300,7 @@ async function showRepList(ids, btn) {
       <td dir="auto">${esc(c.ad_name || c.campaign_name || '')}</td>
       <td class="num">${c.paid_sum ? fmtMoney(c.paid_sum) : c.deal_sum ? fmtMoney(c.deal_sum) + '<small>предложение</small>' : ''}</td></tr>`).join('')}</tbody></table>`;
   $('#rep-list-x').onclick = () => { box.hidden = true; btn.classList.remove('on'); };
-  $$('tr[data-conv]', box).forEach((tr) => tr.onclick = () => { current = Number(tr.dataset.conv); go('inbox'); });
+  $$('tr[data-conv]', box).forEach((tr) => tr.onclick = () => openConv(Number(tr.dataset.conv), true));
   box.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
@@ -2374,8 +2375,8 @@ async function renderTasks() {
   $$('#tk .tk-row').forEach((r) => r.onclick = (e) => {
     if (e.target.closest('button')) return;
     if (!r.dataset.conv) { if (r.dataset.link) window.open(r.dataset.link, '_blank', 'noopener'); return; }
-    current = Number(r.dataset.conv);
-    go('inbox');
+    // карточка открывается поверх задач: закрыл — и ты снова в списке
+    openConv(Number(r.dataset.conv), true);
   });
   $$('#tk [data-gdone]').forEach((b) => b.onclick = async () => {
     b.disabled = true;
@@ -2511,7 +2512,7 @@ async function loadLogs(q = '') {
           <td>${a.entity === 'lead' ? who(a.conv_name, a.conv_phone) || '#' + a.entity_id : 'менеджер #' + a.entity_id}</td>
           <td>${esc(f)}: ${esc(histValue(a.field, a.old_value))} → <b>${esc(histValue(a.field, a.new_value))}</b>${a.reason ? `<small>${esc(a.reason)}</small>` : ''}</td></tr>`;
       }).join('')}</tbody></table>` : '<div class="empty">Ничего не найдено</div>';
-      $$('tr[data-conv]', box).forEach((tr) => tr.dataset.conv && (tr.onclick = () => { current = Number(tr.dataset.conv); go('inbox'); }));
+      $$('tr[data-conv]', box).forEach((tr) => tr.dataset.conv && (tr.onclick = () => openConv(Number(tr.dataset.conv), true)));
     } else if (logTab === 'access') {
       const rows = await api('/api/logs/access');
       box.innerHTML = rows.length ? `<table class="log-t"><tbody>${rows.map((a) => `<tr class="${a.action === 'login_failed' ? 'bad' : ''}">
