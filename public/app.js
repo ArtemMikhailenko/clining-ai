@@ -2363,9 +2363,9 @@ async function renderTasks() {
       <div class="tk-list">${list.map((t) => `<div class="tk-row tk-${t.kind} ${t.late ? 'late' : ''}" data-conv="${t.conv_id || ''}" data-link="${esc(t.link || '')}">
         <span class="tk-when">${esc(when(t))}</span>
         <span class="tk-kind tk-k-${t.kind}">${TASK_KIND[t.kind]}</span>
-        <span class="tk-what"><b dir="auto">${esc(t.what)}</b>
-          <small dir="auto">${t.kind === 'google' ? `заведено в Google Календаре${t.district ? ' · ' + esc(t.district) : ''}`
-            : `${esc(t.name || '+' + t.phone)}${t.name ? ' · +' + esc(t.phone) : ''}${t.district ? ' · ' + esc(t.district) : ''} · ${esc(stage(t))}`}</small></span>
+        <span class="tk-what"><b><bdi>${esc(t.what)}</bdi></b>
+          <small>${t.kind === 'google' ? `заведено в Google Календаре${t.district ? ' · <bdi>' + esc(t.district) + '</bdi>' : ''}`
+            : `<bdi>${esc(t.name || '+' + t.phone)}</bdi>${t.name ? ' · +' + esc(t.phone) : ''}${t.district ? ' · <bdi>' + esc(t.district) + '</bdi>' : ''} · ${esc(stage(t))}`}</small></span>
         <span class="tk-who">${esc(t.who || '—')}</span>
         <span class="tk-act">${t.kind === 'task' ? `<button class="btn sm" data-done="${t.conv_id}">Сделано</button>`
           : t.kind === 'google' ? `<button class="btn sm" data-gdone="${esc(t.event_id)}">Сделано</button>` : ''}</span>
