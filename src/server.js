@@ -30,7 +30,7 @@ import { syncCalendar, calendarStatus, startCalendar, doneExternal } from './gca
 import { calendarEvents } from './calendar.js';
 import { listManagers, saveManager, deleteManager, getManager, setManager, assignHandoff, clearCallDue,
   listCalls, logCall, saveRecording, sweepRecordings, overdueCalls, CALL_STATUS, recordingFile, deleteRecording,
-  restoreRecording, purgeTrash, LANGS } from './calls.js';
+  restoreRecording, purgeTrash, LANGS, bulkAssign } from './calls.js';
 import { takeLead, startQueue, teamStats } from './queue.js';
 import { aiConfigured, aiLabel } from './ai.js';
 
@@ -78,7 +78,7 @@ const OWNER_ONLY = [
   ['*', /^\/api\/maintenance\//], ['POST', /^\/api\/wa\/(pair|logout|restart)$/], ['POST', /^\/api\/sim\//],
   ['GET', /^\/api\/logs\//], ['POST', /^\/api\/logs\//], ['POST', /^\/api\/conversations\/\d+\/(delete|restore)$/],
   ['GET', /^\/api\/conversations\/deleted$/], ['*', /^\/api\/calls\/\d+\/recording/],
-  ['*', /^\/api\/report/], ['*', /^\/api\/meta\//], ['*', /^\/api\/spend/], ['*', /^\/api\/gcal\//], ['GET', /^\/api\/team-stats/]
+  ['*', /^\/api\/report/], ['*', /^\/api\/meta\//], ['*', /^\/api\/spend/], ['*', /^\/api\/gcal\//], ['GET', /^\/api\/team-stats/], ['POST', /^\/api\/managers\/bulk-assign$/]
 ];
 const CONV_WRITE = /^\/api\/conversations\/(\d+)\/(lead|note|send|mode|stage|flag|reviewed|next|calls|status|payments|payments\/\d+\/delete|works\/\d+\/\w+|new-deal)$/;
 
@@ -920,6 +920,14 @@ app.post('/api/managers', (req, res) => {
     }
     emit('conversations', null);
     res.json(getManager(m.id));
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+// передать заявки пачкой (только владелец); dry — сначала посчитать
+app.post('/api/managers/bulk-assign', (req, res) => {
+  try {
+    const r = bulkAssign(req.body || {});
+    if (!req.body?.dry) emit('conversations', null);
+    res.json(r);
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 app.delete('/api/managers/:id', (req, res) => {

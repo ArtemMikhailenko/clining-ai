@@ -138,6 +138,37 @@ export function setManager(convId, managerId, actor = actorName('менедже�
   audit('lead', convId, 'manager_id', getManager(conv.manager_id)?.name ?? null, m?.name ?? null, actor);
 }
 
+/**
+ * Передать заявки пачкой: например, все, что записались на аккаунт владельца,
+ * — менеджеру, который на самом деле их вёл. Каждая заявка — отдельной строкой
+ * в журнале изменений, чтобы перенос можно было проверить и откатить.
+ * В статистику менеджера («взял в работу») такая передача не идёт.
+ */
+export function bulkAssign({ to, from = 'all', scope = 'active', dry = false }, actor = actorName('владелец')) {
+  const m = getManager(Number(to));
+  if (!m) throw new Error('Кому передать?');
+  const where = ['deleted_at IS NULL', '(manager_id IS NULL OR manager_id != ?)'];
+  const args = [m.id];
+  if (scope !== 'all') where.push("status != 'closed'");
+  if (from === 'none') where.push('manager_id IS NULL');
+  else if (from !== 'all') { where.push('manager_id = ?'); args.push(Number(from)); }
+  const rows = db.prepare(`SELECT id, manager_id FROM conversations WHERE ${where.join(' AND ')}`).all(...args);
+  if (dry) return { count: rows.length, to: m.name };
+  const upd = db.prepare(`UPDATE conversations SET manager_id=?, taken_at=COALESCE(taken_at, datetime('now')),
+    assigned_at=COALESCE(assigned_at, datetime('now')), offered_to=NULL, offer_due_at=NULL, open_at=NULL WHERE id=?`);
+  const log = db.prepare("INSERT INTO assign_log(conv_id, manager_id, kind, note) VALUES (?, ?, 'bulk', ?)");
+  db.exec('BEGIN');
+  try {
+    for (const r of rows) {
+      upd.run(m.id, r.id);
+      log.run(r.id, m.id, 'массовая передача');
+      audit('lead', r.id, 'manager_id', getManager(r.manager_id)?.name ?? null, m.name, actor, 'массовая передача');
+    }
+    db.exec('COMMIT');
+  } catch (e) { db.exec('ROLLBACK'); throw e; }
+  return { count: rows.length, to: m.name };
+}
+
 /** Звонок больше не нужен: вернули боту, закрыли, сняли флаг. */
 export function clearCallDue(convId, actor, why) {
   const conv = db.prepare('SELECT call_due_at FROM conversations WHERE id=?').get(convId);

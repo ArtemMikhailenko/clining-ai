@@ -2651,6 +2651,13 @@ function renderSettings() {
       body: grp('Список', 'Номер — с кодом страны, на него придут уведомления в WhatsApp. Логин и пароль — для входа в CRM под своим именем; пароль хранится зашифрованным, посмотреть его нельзя, только задать новый. «Владелец» видит настройки и журналы, «менеджер» — только заявки. «Принимает заявки» выключите на время отпуска.',
           `<div id="f-team" class="team">${(s.managers || []).map(mgrRow).join('')}</div>
            <div class="team-add"><button class="btn ghost sm" id="f-addmgr">+ Добавить</button></div>`)
+        + grp('Передать заявки', 'Например, все заявки, которые записались на аккаунт владельца, — менеджеру, который их на самом деле вёл. Каждая передача попадает в журнал изменений.',
+          srow('Чьи заявки', '', `<select id="ba-from"><option value="all">все заявки</option><option value="none">без ответственного</option>${
+            (s.managers || []).map((m) => `<option value="${m.id}">${esc(m.name)}</option>`).join('')}</select>`)
+          + srow('Кому', '', `<select id="ba-to">${(s.managers || []).map((m) => `<option value="${m.id}">${esc(m.name)}</option>`).join('')}</select>`)
+          + srow('Какие', 'Архив — закрытые и оплаченные: от них зависит % закрытия в статистике менеджера.', `<select id="ba-scope">
+            <option value="active">только в работе</option><option value="all">все, включая архив</option></select>`)
+          + srow('', '', '<button class="btn primary sm" id="ba-go" type="button">Передать…</button>'))
         + grp('Очередь заявок', 'Порядок — как в списке выше, меняется стрелками. «В день» — сколько новых заявок менеджер получает первым; 0 — не получает, берёт только из общего списка. Язык не отмечен — берёт заявки на любом языке. Выключенный «принимает заявки» очередь пропускает.',
           srow('Время, чтобы взять в работу', 'Не нажал «Взять в работу» за это время (рабочее) — заявка уходит следующему, ему приходит уведомление.', unit('f-offermin', s.offer_minutes ?? 60, 'минут', 5, 480))
           + srow('Открыть заявку всем после просрочки', 'Задача ответственного (звонок или действие) просрочена на столько часов — карточку может взять любой, остальным приходит уведомление «клиент ждёт».', unit('f-openhrs', s.open_after_hours ?? 5, 'часов', 1, 72)))
@@ -2828,6 +2835,17 @@ function renderSettings() {
     $('#f-team').insertAdjacentHTML('beforeend', mgrRow({ role: 'manager', active: 1 }));
     const row = $('#f-team').lastElementChild;
     bindMgr(row); row.querySelector('.m-name').focus(); setDirty(true);
+  });
+  $('#ba-go') && ($('#ba-go').onclick = async () => {
+    const body = { from: $('#ba-from').value, to: Number($('#ba-to').value), scope: $('#ba-scope').value };
+    try {
+      const pre = await api('/api/managers/bulk-assign', { method: 'POST', body: JSON.stringify({ ...body, dry: true }) });
+      if (!pre.count) return toast('Таких заявок нет — передавать нечего');
+      if (!confirm(`Передать ${pre.count} ${plural(pre.count, 'заявку', 'заявки', 'заявок')} менеджеру ${pre.to}? Он станет ответственным, остальные смогут только смотреть.`)) return;
+      const r = await api('/api/managers/bulk-assign', { method: 'POST', body: JSON.stringify(body) });
+      toast(`Передано ${r.count} — ведёт ${r.to}`);
+      loadList();
+    } catch (e) { toast(e.message, true); }
   });
   $('#f-reset').onclick = () => renderSettings();
   $('#f-save').onclick = saveSettings;
