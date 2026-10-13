@@ -602,17 +602,21 @@ function renderDash() {
     const box = $('#dash-jobs');
     if (!box) return;
     const today = iso(new Date());
-    const soon = rows.filter((j) => j.date >= today).slice(0, 5);
-    box.innerHTML = soon.length ? soon.map((j) => {
+    // только подтверждённые записи: дата, которую клиент назвал боту, — ещё не уборка
+    const soon = rows.filter((j) => j.date >= today && j.kind !== 'wish').slice(0, 5);
+    const wishes = rows.filter((j) => j.date >= today && j.kind === 'wish').length;
+    box.innerHTML = (soon.length ? soon.map((j) => {
       const d = new Date(j.date + 'T12:00:00');
-      return `<div class="jrow" data-id="${j.id}">
+      return `<div class="jrow" data-id="${j.id}" data-kind="${j.kind}">
         <span class="jdate ${j.date === today ? 'today' : ''}"><b>${d.getDate()}</b><span>${d.toLocaleDateString('ru-RU', { weekday: 'short' })}</span></span>
         <div class="jtxt"><div class="jn" dir="auto">${esc(j.name || '+' + j.phone)}</div>
           <div class="js" dir="auto">${esc([j.time, j.service, j.area && j.area + ' м²', j.district].filter(Boolean).join(' · '))}</div></div>
         ${j.price ? `<span class="jp">${esc(j.price)}</span>` : ''}
       </div>`;
-    }).join('') : pempty('пока ничего не назначено', ICONS.cal);
-    $$('.jrow', box).forEach((r) => r.onclick = () => openConv(Number(r.dataset.id), true));
+    }).join('') : pempty('пока ничего не назначено', ICONS.cal))
+      + (wishes ? `<div class="jwish">Ещё ${wishes} ${plural(wishes, 'клиент назвал', 'клиента назвали', 'клиентов назвали')} дату, но не ${wishes === 1 ? 'записан' : 'записаны'} — <a href="#" id="jwish-go">в расписании</a> они жёлтые</div>` : '');
+    $$('.jrow', box).forEach((r) => r.onclick = () => (r.dataset.kind === 'manual' ? go('cal') : openConv(Number(r.dataset.id), true)));
+    $('#jwish-go') && ($('#jwish-go').onclick = (e) => { e.preventDefault(); go('cal'); });
   }).catch(() => {});
 }
 
