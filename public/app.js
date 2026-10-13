@@ -212,6 +212,19 @@ function ownerChip(c) {
   if (offerLeft(c)) return `<span class="chip offer" title="Если не возьмёт в работу до этого времени — заявка уйдёт следующему">Предложена: ${esc(mgrName(c.offered_to) || '—')} · до ${hhmm(c.offer_due_at)}</span>`;
   return '<span class="chip free">Свободная — можно взять</span>';
 }
+/** Крупная строка на карточке доски: кто ведёт заявку — видно сразу, без раскрытия. */
+function ownerLine(c) {
+  if (c.status === 'closed' && !c.manager_id) return '';
+  const icon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="8" r="4"/><path d="M4 21c1.2-4 4.3-6 8-6s6.8 2 8 6"/></svg>';
+  if (c.manager_id) {
+    const mine = c.manager_id === me().id;
+    return `<div class="card-owner ${mine ? 'me' : 'own'}">${icon}<span>${mine ? 'В работе у вас' : 'В работе: <b>' + esc(mgrName(c.manager_id) || '—') + '</b>'}</span>${
+      c.open_at ? '<i>открыта всем</i>' : ''}</div>`;
+  }
+  if (offerLeft(c)) return `<div class="card-owner offer">${icon}<span>Предложена: <b>${esc(mgrName(c.offered_to))}</b></span><i>до ${hhmm(c.offer_due_at)}</i></div>`;
+  return `<div class="card-owner free">${icon}<span>Не взята в работу</span></div>`;
+}
+
 /** Может ли текущий пользователь нажать «Взять в работу». */
 function canTake(c) {
   const u = me();
@@ -223,9 +236,9 @@ function canTake(c) {
 /** Менять заявку может только тот, кто её ведёт (и владелец). */
 const canEdit = (c) => me().role === 'owner' || (me().id && c.manager_id === me().id);
 
-function chipFor(c) {
+function chipFor(c, { owner = true } = {}) {
   if (c.status === 'closed') return '<span class="chip closed">в архиве</span>';
-  const chips = [ownerChip(c)];
+  const chips = owner ? [ownerChip(c)] : [];
   if (c.needs_human) chips.push('<span class="chip need">нужен менеджер</span>');
   else chips.push(c.ai_enabled ? '<span class="chip ai">ИИ ведёт</span>' : '<span class="chip human">менеджер</span>');
   const cs = callState(c);
@@ -993,10 +1006,11 @@ function cardHtml(c) {
       <span class="card-meta"><span class="card-time ${c.unread ? 'new' : ''}">${msgTime(c.last_at)}</span>
         ${c.unread ? `<span class="badge">${c.unread}</span>` : ''}</span>
     </div>
+    ${ownerLine(c)}
     ${facts ? `<div class="facts">${facts}</div>` : ''}
     ${thumbs ? `<div class="card-thumbs">${thumbs}</div>` : ''}
     <div class="card-snip" dir="auto">${esc(c.summary || c.last_body || '')}</div>
-    <div class="card-foot">${chipFor(c)}${waitHtml(c)}</div>
+    <div class="card-foot">${chipFor(c, { owner: false })}${waitHtml(c)}</div>
   </div>`;
 }
 

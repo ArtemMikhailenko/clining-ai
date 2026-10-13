@@ -474,6 +474,17 @@ header .sub{color:var(--muted);font-size:12.5px;margin-top:2px;letter-spacing:0}
 .card-foot{display:flex;align-items:center;gap:7px;margin-top:11px;padding-top:10px;
   border-top:var(--hair) solid var(--border-soft);flex-wrap:nowrap;min-width:0}
 .card-foot{flex-wrap:wrap;row-gap:5px}
+/* кто ведёт заявку — отдельная строка на карточке доски */
+.card-owner{display:flex;align-items:center;gap:7px;margin-top:9px;padding:5px 9px;border-radius:7px;font-size:12px;
+  background:var(--surface-2);color:var(--text-2)}
+.card-owner svg{width:13px;height:13px;flex:none}
+.card-owner span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.card-owner b{font-weight:600}
+.card-owner i{margin-left:auto;font-style:normal;font-size:11px;white-space:nowrap;opacity:.85}
+.card-owner.own{background:var(--green-soft);color:var(--green)}
+.card-owner.me{background:var(--accent-soft);color:var(--accent-2)}
+.card-owner.offer{background:var(--warn-soft);color:var(--warn)}
+.card-owner.free{border:1px dashed var(--border);background:transparent;color:var(--muted)}
 .card-foot .chip{min-width:0;overflow:hidden;text-overflow:ellipsis}
 .card-foot .t{margin-left:auto;font-size:11px;color:var(--muted);white-space:nowrap;flex:none}
 .card-thumbs{display:flex;gap:3px;margin-top:9px}
