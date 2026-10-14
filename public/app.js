@@ -2629,6 +2629,22 @@ const mgrRow = (m) => `<div class="mgr-row" data-id="${m.id || ''}">
   <small class="m-seen">${m.can_login ? `вход есть${m.last_login_at ? ' · последний ' + dayTime(m.last_login_at) : ' · ещё не входил'}` : m.id ? 'входа нет: задайте логин и пароль' : ''}</small></div>`;
 let mgrGone = new Set();
 
+/* Журнал обрывов WhatsApp: по нему видно, отвязал ли номер сам WhatsApp или сервер потерял сессию */
+const WA_EV = {
+  start: 'Сервер запущен', open: 'WhatsApp подключён', close: 'Связь оборвалась — переподключаемся',
+  logout: 'WhatsApp отключил это устройство (как «Выйти» в «Связанных устройствах»)', qr: 'Нужна новая привязка'
+};
+function renderWaDiag() {
+  const box = $('#wa-diag');
+  if (!box) return;
+  const ev = (waState.events || []).slice(-10).reverse();
+  box.innerHTML = (waState.disk === false ? `<div class="wa-warn">Данные сервера не на постоянном диске: после каждого деплоя или перезапуска Render
+      WhatsApp придётся привязывать заново. В Render: сервис → Disks → Add Disk, путь <code>/app/data</code>.</div>` : '')
+    + (ev.length ? `<h5>Последние события связи</h5><div class="wa-ev">${ev.map((e) => `<div class="${e.kind}">
+        <span>${new Date(e.at).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}</span>
+        <b>${esc(WA_EV[e.kind] || e.kind)}</b>${e.code ? `<small>код ${e.code}</small>` : ''}${e.note ? `<small>${esc(e.note)}</small>` : ''}</div>`).join('')}</div>` : '');
+}
+
 function setDirty(v) {
   setDirtyFlag = v;
   $('#save-bar')?.classList.toggle('on', v);
@@ -2824,7 +2840,8 @@ function renderSettings() {
           <div class="ctile"><span>Модель</span><b>${esc(s.ai_label || '—')}</b></div>
           <div class="ctile"><span>Голосовые</span><b>${esc(s.stt_label || 'не настроено')}</b></div></div>`
         + srow('Привязка WhatsApp', 'QR-код или код по номеру телефона, отвязка и переподключение.',
-          '<button class="btn primary" id="f-qr">Управлять подключением</button>'))
+          '<button class="btn primary" id="f-qr">Управлять подключением</button>')
+        + '<div id="wa-diag" class="wa-diag"></div>')
       + grp('Глубина обдумывания', 'Сколько модель думает над каждым ответом. Выше — реже теряет нить в длинной переписке, но отвечает медленнее и дороже. Применяется сразу, перезапуск не нужен.',
         srow('Уровень', 'Обычному диалогу хватает среднего. Высокий имеет смысл, когда бот путается в условиях или повторяется.',
           `<select id="f-effort">${[['low', 'Низкая - быстро и дёшево'], ['medium', 'Средняя - по умолчанию'], ['high', 'Высокая - думает дольше']]
@@ -2909,6 +2926,7 @@ function renderSettings() {
     $('#i-wa').textContent = t;
     $('#i-led').className = 'led ' + cls;
     $('#i-me').textContent = waState.me ? '+' + waState.me : '—';
+    renderWaDiag();
   }
   mgrGone = new Set();
   const bindMgr = (row) => {

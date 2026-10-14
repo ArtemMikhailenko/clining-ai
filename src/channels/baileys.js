@@ -23,7 +23,32 @@ let onMessage = null;
 const SELF_TEST = process.env.SELF_TEST === '1';
 const DEBUG = process.env.WA_DEBUG === '1';   // печатать всё, что приходит от WhatsApp
 const sentIds = new Set();   // свои же отправленные — не обрабатывать повторно
-const status = { state: 'offline', qr: null, me: null, error: null, pairCode: null, pairPhone: null };
+const status = { state: 'offline', qr: null, me: null, error: null, pairCode: null, pairPhone: null, events: [], disk: null };
+
+/*
+ * Диагностика отвязки. «Попросил подключить заново» бывает по двум причинам:
+ * WhatsApp сам отключил устройство (код 401) — или сервер перезапустился, а
+ * папка data не на постоянном диске, и ключи сессии пропали. Журнал обрывов
+ * и проверка диска показывают, какой из двух случаев.
+ */
+const EVENTS_FILE = path.join(process.cwd(), 'data', 'wa-events.json');
+try { status.events = JSON.parse(fs.readFileSync(EVENTS_FILE, 'utf8')).slice(-20); } catch {}
+function waEvent(kind, extra = {}) {
+  status.events = [...status.events, { at: new Date().toISOString(), kind, ...extra }].slice(-20);
+  try { fs.mkdirSync(path.dirname(EVENTS_FILE), { recursive: true }); fs.writeFileSync(EVENTS_FILE, JSON.stringify(status.events)); } catch {}
+}
+// На Render постоянный диск — отдельное устройство. Если data на том же устройстве,
+// что и код, при каждом деплое или перезапуске сессия WhatsApp теряется
+function checkDisk() {
+  if (!process.env.RENDER) return null;
+  try {
+    const dir = path.join(process.cwd(), 'data');
+    fs.mkdirSync(dir, { recursive: true });
+    return fs.statSync(dir).dev !== fs.statSync(process.cwd()).dev;
+  } catch { return null; }
+}
+status.disk = checkDisk();
+if (status.disk === false) console.error('⚠ Папка data не на постоянном диске: после перезапуска WhatsApp придётся привязывать заново');
 const AUTH_DIR = path.join(process.cwd(), 'data', 'wa-auth');
 // номер поколения сокета: после «Переподключить» или «Отвязать» старый сокет
 // ещё успевает прислать события — они не должны менять состояние нового
@@ -109,6 +134,8 @@ const wipeAuth = () => fs.rmSync(AUTH_DIR, { recursive: true, force: true });
 async function connect() {
   const my = ++gen;
   const live = () => my === gen;
+  const hadCreds = fs.existsSync(path.join(AUTH_DIR, 'creds.json'));
+  if (my === 1) waEvent('start', { note: hadCreds ? 'сервер запущен, сессия на месте' : 'сервер запущен без сессии WhatsApp' });
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
   const { version } = await fetchLatestBaileysVersion();
 
@@ -130,6 +157,7 @@ async function connect() {
   sock.ev.on('connection.update', async (u) => {
     if (!live()) return;
     if (u.qr) {
+      if (status.state !== 'qr') waEvent('qr', { note: hadCreds ? 'ключи были, но не подошли' : 'ключей сессии нет — нужна привязка' });
       status.state = 'qr';
       status.error = null;
       status.qr = await QRCode.toDataURL(u.qr, { margin: 1, width: 320 });
@@ -142,6 +170,7 @@ async function connect() {
       status.pairCode = null;
       status.pairPhone = null;
       status.me = sock.user?.id?.split(':')[0] ?? null;
+      waEvent('open');
       console.log('WhatsApp подключён:', status.me,
         DEBUG ? `| id=${sock.user?.id} lid=${sock.user?.lid ?? '—'}` : '');
       pushStatus();
@@ -155,7 +184,8 @@ async function connect() {
       status.pairCode = null;          // код привязан к сокету: после обрыва он недействителен
       if (loggedOut) status.me = null;
       pushStatus();
-      console.log('WhatsApp отключён:', status.error);
+      console.log('WhatsApp отключён:', code, status.error);
+      waEvent(loggedOut ? 'logout' : 'close', { code: code ?? null, note: u.lastDisconnect?.error?.message ?? null });
       // Старые ключи после разлогина бесполезны. Раньше здесь был return — и бот
       // навсегда оставался без QR до перезапуска сервера. Теперь начинаем с чистого листа.
       if (loggedOut) wipeAuth();

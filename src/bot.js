@@ -77,7 +77,8 @@ function pickGreeting(text) {
     if (m) map.set(m[1].toLowerCase(), m[2]);
   }
   // {company} в тексте приветствия — название компании из настроек
-  const fill = (s) => s.replaceAll('{company}', getSetting('company') || '');
+  // длинное тире в мессенджере выдаёт текст, написанный не человеком, — как и в ответах модели
+  const fill = (s) => s.replaceAll('{company}', getSetting('company') || '').replace(/\s*[—–]\s*/g, ' - ');
   if (!map.size) return fill(raw);                 // одна строка без префикса — как есть
   return fill(map.get(detectLang(text)) ?? map.get('ru') ?? [...map.values()][0]);
 }
