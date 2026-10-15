@@ -2637,12 +2637,13 @@ const WA_EV = {
 function renderWaDiag() {
   const box = $('#wa-diag');
   if (!box) return;
-  const ev = (waState.events || []).slice(-10).reverse();
+  const ev = (waState.events || []).slice(-25).reverse();
   box.innerHTML = (waState.disk === false ? `<div class="wa-warn">Данные сервера не на постоянном диске: после каждого деплоя или перезапуска Render
       WhatsApp придётся привязывать заново. В Render: сервис → Disks → Add Disk, путь <code>/app/data</code>.</div>` : '')
     + (ev.length ? `<h5>Последние события связи</h5><div class="wa-ev">${ev.map((e) => `<div class="${e.kind}">
         <span>${new Date(e.at).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}</span>
-        <b>${esc(WA_EV[e.kind] || e.kind)}</b>${e.code ? `<small>код ${e.code}</small>` : ''}${e.note ? `<small>${esc(e.note)}</small>` : ''}</div>`).join('')}</div>` : '');
+        <b>${esc(e.kind === 'close' && e.code === 408 ? 'QR-код истёк — ждём, когда отсканируют' : WA_EV[e.kind] || e.kind)}${e.count > 1 ? ` ×${e.count}` : ''}</b>${e.code ? `<small>код ${e.code}</small>` : ''}${
+          e.count > 1 && e.last_at ? `<small>последний раз ${new Date(e.last_at).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}</small>` : ''}${e.note ? `<small>${esc(e.note)}</small>` : ''}</div>`).join('')}</div>` : '');
 }
 
 function setDirty(v) {

@@ -34,7 +34,16 @@ const status = { state: 'offline', qr: null, me: null, error: null, pairCode: nu
 const EVENTS_FILE = path.join(process.cwd(), 'data', 'wa-events.json');
 try { status.events = JSON.parse(fs.readFileSync(EVENTS_FILE, 'utf8')).slice(-20); } catch {}
 function waEvent(kind, extra = {}) {
-  status.events = [...status.events, { at: new Date().toISOString(), kind, ...extra }].slice(-20);
+  const now = new Date().toISOString();
+  const last = status.events.at(-1);
+  // QR истёк, пока никто не сканирует (408), — повторяется каждые пару минут и
+  // вытеснял из журнала главное: почему отвязалось. Повторы сворачиваем в одну строку
+  if (last && last.kind === kind && last.code === (extra.code ?? null) && last.note === (extra.note ?? null) && kind !== 'start') {
+    last.count = (last.count || 1) + 1;
+    last.last_at = now;
+  } else {
+    status.events = [...status.events, { at: now, kind, ...extra }].slice(-50);
+  }
   try { fs.mkdirSync(path.dirname(EVENTS_FILE), { recursive: true }); fs.writeFileSync(EVENTS_FILE, JSON.stringify(status.events)); } catch {}
 }
 // На Render постоянный диск — отдельное устройство. Если data на том же устройстве,
