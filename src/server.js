@@ -30,7 +30,7 @@ import { syncCalendar, calendarStatus, startCalendar, doneExternal } from './gca
 import { calendarEvents } from './calendar.js';
 import { listManagers, saveManager, deleteManager, getManager, setManager, assignHandoff, clearCallDue,
   listCalls, logCall, saveRecording, sweepRecordings, overdueCalls, CALL_STATUS, recordingFile, deleteRecording,
-  restoreRecording, purgeTrash, LANGS, bulkAssign } from './calls.js';
+  restoreRecording, purgeTrash, LANGS, bulkAssign, setCallDue, sqlTime, callDue } from './calls.js';
 import { takeLead, startQueue, teamStats } from './queue.js';
 import { aiConfigured, aiLabel } from './ai.js';
 
@@ -80,7 +80,7 @@ const OWNER_ONLY = [
   ['GET', /^\/api\/conversations\/deleted$/], ['*', /^\/api\/calls\/\d+\/recording/],
   ['*', /^\/api\/report/], ['*', /^\/api\/meta\//], ['*', /^\/api\/spend/], ['*', /^\/api\/gcal\//], ['GET', /^\/api\/team-stats/], ['POST', /^\/api\/managers\/bulk-assign$/]
 ];
-const CONV_WRITE = /^\/api\/conversations\/(\d+)\/(lead|note|send|mode|stage|flag|reviewed|next|calls|status|payments|payments\/\d+\/delete|works\/\d+\/\w+|new-deal)$/;
+const CONV_WRITE = /^\/api\/conversations\/(\d+)\/(lead|note|send|mode|stage|flag|reviewed|next|call-due|calls|status|payments|payments\/\d+\/delete|works\/\d+\/\w+|new-deal)$/;
 
 app.use((req, res, next) => {
   const u = req.user;
@@ -971,6 +971,48 @@ app.post('/api/conversations/:id/next', (req, res) => {
 
 /** Задачи: кому, когда и что сделать — все запланированные действия одним списком. */
 app.get('/api/tasks', (req, res) => res.json(tasksList()));
+
+// срок звонка вручную: «сделано» без записи звонка или перенос
+app.post('/api/conversations/:id/call-due', (req, res) => {
+  const id = Number(req.params.id);
+  try { setCallDue(id, req.body || {}); }
+  catch (e) { return res.status(400).json({ error: e.message }); }
+  emit('conversations', null);
+  res.json(getConversation(id));
+});
+
+/**
+ * Просроченное пачкой: перенести на сегодня или отметить выполненным.
+ * Менеджер — только своё; владелец — всё или только своё («Мои»).
+ */
+app.post('/api/tasks/overdue', (req, res) => {
+  const u = req.user || {};
+  const action = req.body?.action;
+  if (!['today', 'done'].includes(action)) return res.status(400).json({ error: 'Что сделать с просроченными?' });
+  const onlyMine = u.role !== 'owner' || Boolean(req.body?.mine);
+  const mine = (id) => !onlyMine || id === u.id;
+  const now = sqlTime(new Date());
+  let n = 0;
+  for (const c of db.prepare(`SELECT id, manager_id FROM conversations WHERE deleted_at IS NULL AND status != 'closed'
+      AND call_due_at IS NOT NULL AND call_due_at <= ?`).all(now)) {
+    if (!mine(c.manager_id)) continue;
+    setCallDue(c.id, action === 'done' ? { done: true } : { at: 'today' });
+    n++;
+  }
+  for (const c of db.prepare(`SELECT id, manager_id, next_action_mgr FROM conversations WHERE deleted_at IS NULL
+      AND next_action IS NOT NULL AND next_action_at IS NOT NULL AND next_action_at <= ?`).all(now)) {
+    if (!mine(c.next_action_mgr || c.manager_id)) continue;
+    if (action === 'done') setNext(c.id, { done: true });
+    else {
+      const due = sqlTime(callDue());
+      db.prepare('UPDATE conversations SET next_action_at=?, next_action_notified_at=NULL, open_at=NULL WHERE id=?').run(due, c.id);
+      audit('lead', c.id, 'next_action_at', null, due, u.name || 'менеджер', 'просроченное перенесено на сегодня');
+    }
+    n++;
+  }
+  emit('conversations', null);
+  res.json({ count: n });
+});
 
 /** «Контроль дня» (ТЗ §8): по дате в часовом поясе компании. */
 app.get('/api/control', (req, res) => {

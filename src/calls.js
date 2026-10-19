@@ -133,7 +133,7 @@ export function setManager(convId, managerId, actor = actorName('менедже�
     taken_at=CASE WHEN ? IS NULL THEN NULL ELSE datetime('now') END, offered_to=NULL, offer_due_at=NULL, open_at=NULL WHERE id=?`)
     .run(m?.id ?? null, m?.id ?? null, convId);
   const log = db.prepare('INSERT INTO assign_log(conv_id, manager_id, kind, note) VALUES (?,?,?,?)');
-  if (m && m.id !== conv.manager_id) log.run(convId, m.id, 'taken', 'назначил владелец');
+  if (m && m.id !== conv.manager_id) { log.run(convId, m.id, 'taken', 'назначил владелец'); freshDuesOnTransfer(convId, m.id, actor); }
   if (conv.manager_id && conv.manager_id !== m?.id) log.run(convId, conv.manager_id, 'moved', m ? `передал владелец: ${m.name}` : 'снят владельцем');
   audit('lead', convId, 'manager_id', getManager(conv.manager_id)?.name ?? null, m?.name ?? null, actor);
 }
@@ -161,12 +161,45 @@ export function bulkAssign({ to, from = 'all', scope = 'active', dry = false }, 
   try {
     for (const r of rows) {
       upd.run(m.id, r.id);
+      freshDuesOnTransfer(r.id, m.id, actor);
       log.run(r.id, m.id, 'массовая передача');
       audit('lead', r.id, 'manager_id', getManager(r.manager_id)?.name ?? null, m.name, actor, 'массовая передача');
     }
     db.exec('COMMIT');
   } catch (e) { db.exec('ROLLBACK'); throw e; }
   return { count: rows.length, to: m.name };
+}
+
+/**
+ * Заявку передали другому менеджеру, а срок звонка или задачи уже прошёл: новому
+ * даём свежий срок (начало рабочего окна + норма на звонок). Иначе чужая просрочка
+ * сразу записывалась на него — «просрочено мной», хотя он заявку только получил.
+ */
+export function freshDuesOnTransfer(convId, managerId, actor = actorName('владелец')) {
+  const c = db.prepare('SELECT call_due_at, next_action, next_action_at, next_action_mgr, manager_id FROM conversations WHERE id=?').get(convId);
+  if (!c || !managerId) return;
+  const now = Date.now();
+  const due = sqlTime(callDue());
+  if (c.call_due_at && parseTime(c.call_due_at) <= now) {
+    db.prepare('UPDATE conversations SET call_due_at=?, call_escalated_at=NULL, open_at=NULL WHERE id=?').run(due, convId);
+    audit('lead', convId, 'call_due_at', c.call_due_at, due, actor, 'передана другому менеджеру — новый срок');
+  }
+  if (c.next_action && c.next_action_at && parseTime(c.next_action_at) <= now) {
+    db.prepare('UPDATE conversations SET next_action_at=?, next_action_mgr=?, next_action_notified_at=NULL WHERE id=?').run(due, managerId, convId);
+    audit('lead', convId, 'next_action', `${c.next_action} · ${c.next_action_at}`, `${c.next_action} · ${due}`, actor, 'передана другому менеджеру — новый срок');
+  }
+}
+
+/** Срок звонка вручную: отметить выполненным без записи звонка или перенести. */
+export function setCallDue(convId, b, actor = actorName('менеджер')) {
+  const c = db.prepare('SELECT call_due_at FROM conversations WHERE id=?').get(convId);
+  if (!c) throw new Error('Нет такой заявки');
+  if (b.done) return clearCallDue(convId, actor, 'отмечено выполненным вручную');
+  const at = b.at === 'today' ? callDue() : b.at ? new Date(b.at) : null;
+  if (!at || Number.isNaN(at.getTime())) throw new Error('На когда перенести?');
+  const due = sqlTime(at);
+  db.prepare('UPDATE conversations SET call_due_at=?, call_escalated_at=NULL, open_at=NULL WHERE id=?').run(due, convId);
+  audit('lead', convId, 'call_due_at', c.call_due_at, due, actor, 'перенесено вручную');
 }
 
 /** Звонок больше не нужен: вернули боту, закрыли, сняли флаг. */

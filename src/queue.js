@@ -14,7 +14,7 @@
  * Всё, что происходит с заявкой, пишется в assign_log — из него статистика.
  */
 import { db, getSetting, audit } from './db.js';
-import { getManager, sqlTime, langGroup } from './calls.js';
+import { getManager, sqlTime, langGroup, freshDuesOnTransfer } from './calls.js';
 import { nextWorkStart, localDate, withinWorkHours } from './schedule.js';
 import { notifyManagers, sendToPhones, adminLink, localTime } from './notify.js';
 
@@ -104,7 +104,7 @@ export function takeLead(convId, user) {
     offered_to=NULL, offer_due_at=NULL, open_at=NULL WHERE id=?`).run(user.id, convId);
   logAssign(convId, user.id, 'taken', prev ? 'после просрочки' : c.offered_to === user.id ? 'по очереди' : 'из общего списка');
   // взяли у другого после просрочки — для него это «передал»
-  if (prev && prev !== user.id) logAssign(convId, prev, 'lost', `перешла к ${me.name}`);
+  if (prev && prev !== user.id) { logAssign(convId, prev, 'lost', `перешла к ${me.name}`); freshDuesOnTransfer(convId, user.id, me.name); }
   audit('lead', convId, 'manager_id', getManager(prev)?.name ?? null, me.name, me.name, 'взял в работу');
   return convOf(convId);
 }

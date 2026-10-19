@@ -1516,7 +1516,7 @@ button,a,.lrow,.card,.frow{-webkit-tap-highlight-color:transparent;touch-action:
 .tk-g.late h3{color:var(--danger)}
 .tk-g.today h3{color:var(--accent)}
 .tk-list{background:var(--surface);border:var(--hair) solid var(--border);border-radius:var(--r-lg);overflow:hidden}
-.tk-row{display:grid;grid-template-columns:96px 104px minmax(0,1fr) 130px 90px;gap:12px;align-items:center;padding:10px 14px;
+.tk-row{display:grid;grid-template-columns:96px 104px minmax(0,1fr) 130px auto;gap:12px;align-items:center;padding:10px 14px;
   border-bottom:var(--hair) solid var(--border-soft);cursor:pointer;font-size:13px}
 .tk-row:last-child{border-bottom:0}
 .tk-row:hover{background:var(--side-hover)}
@@ -1537,11 +1537,19 @@ button,a,.lrow,.card,.frow{-webkit-tap-highlight-color:transparent;touch-action:
 /* «Отметить выполненной» — действие, а не статус: контурная, с пустым кружком, при наведении зелёная */
 .btn.mark-done{border-color:var(--s3);color:var(--s3);background:transparent;white-space:nowrap}
 .btn.mark-done:hover{background:var(--s3);color:#fff}
+.tk-act{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+.tk-move{font:inherit;font-size:12px;padding:4px 6px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface);color:var(--text)}
+.tk-g h3 .tk-bulk{margin-left:auto;display:inline-flex;gap:6px;flex-wrap:wrap}
+.tk-g h3{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 #tk-kind{flex-wrap:wrap}
 @media (max-width:720px){
   .tk{padding:12px 16px 24px}
-  .tk-row{grid-template-columns:auto 1fr auto;grid-template-areas:"when kind act" "what what what" "who who who";gap:4px 10px}
-  .tk-when{grid-area:when}.tk-kind{grid-area:kind}.tk-what{grid-area:what}.tk-who{grid-area:who;font-size:11.5px}.tk-act{grid-area:act}
+  /* кнопки — отдельной строкой внизу: две в строку времени не помещаются */
+  .tk-row{grid-template-columns:auto 1fr;grid-template-areas:"when kind" "what what" "who who" "act act";gap:4px 10px}
+  .tk-when{grid-area:when}.tk-kind{grid-area:kind;justify-self:start}.tk-what{grid-area:what}.tk-who{grid-area:who;font-size:11.5px}
+  .tk-act{grid-area:act;justify-self:stretch;justify-content:flex-start;margin-top:4px}
+  .tk-act:empty{display:none}
+  .tk-g h3 .tk-bulk{flex-basis:100%;margin-left:0}
 }
 /* две рабочие колонки: на широком экране карточки раскладываются сеткой */
 @media (min-width:1100px){

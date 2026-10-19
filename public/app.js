@@ -2412,7 +2412,9 @@ async function renderTasks() {
   const groups = Object.keys(TASK_BUCKET).map((b) => [b, items.filter((t) => t.bucket === b)]).filter(([, l]) => l.length);
 
   $('#tk').innerHTML = groups.length ? groups.map(([b, list]) => `<section class="tk-g ${b}">
-      <h3>${TASK_BUCKET[b]} <span>${list.length}</span></h3>
+      <h3>${TASK_BUCKET[b]} <span>${list.length}</span>${b === 'late' && list.some((t) => t.kind === 'call' || t.kind === 'task')
+        ? `<div class="tk-bulk"><button class="btn ghost sm" data-late="today" title="Новый срок — сегодня, в начале рабочего окна">Перенести все на сегодня</button>
+           <button class="btn ghost sm" data-late="done">Отметить все выполненными</button></div>` : ''}</h3>
       <div class="tk-list">${list.map((t) => `<div class="tk-row tk-${t.kind} ${t.late ? 'late' : ''}" data-conv="${t.conv_id || ''}" data-link="${esc(t.link || '')}">
         <span class="tk-when">${esc(when(t))}</span>
         <span class="tk-kind tk-k-${t.kind}">${TASK_KIND[t.kind]}</span>
@@ -2420,7 +2422,12 @@ async function renderTasks() {
           <small>${t.kind === 'google' ? `заведено в Google Календаре${t.district ? ' · <bdi>' + esc(t.district) + '</bdi>' : ''}`
             : `<bdi>${esc(t.name || '+' + t.phone)}</bdi>${t.name ? ' · +' + esc(t.phone) : ''}${t.district ? ' · <bdi>' + esc(t.district) + '</bdi>' : ''} · ${esc(stage(t))}`}</small></span>
         <span class="tk-who">${esc(t.who || '—')}</span>
-        <span class="tk-act">${t.kind === 'task' ? `<button class="btn sm mark-done" data-done="${t.conv_id}" title="Задача выполнена — убрать из списка">○ Отметить выполненной</button>`
+        <span class="tk-act">${t.kind === 'call'
+          // звонок обычно закрывается записью звонка; но бывает, что клиенту уже позвонили
+          // с телефона или заявку передали — тогда срок закрывают или переносят вручную
+          ? `<button class="btn sm mark-done" data-cdone="${t.conv_id}" title="Звонок сделан или уже не нужен — убрать срок">○ Отметить выполненной</button>
+             <button class="btn ghost sm" data-cmove="${t.conv_id}" title="Назначить новый срок звонка">Перенести</button>`
+          : t.kind === 'task' ? `<button class="btn sm mark-done" data-done="${t.conv_id}" title="Задача выполнена — убрать из списка">○ Отметить выполненной</button>`
           : t.kind === 'google' ? `<button class="btn sm mark-done" data-gdone="${esc(t.event_id)}" title="Событие выполнено — убрать из списка">○ Отметить выполненной</button>` : ''}</span>
       </div>`).join('')}</div></section>`).join('')
     : `<div class="empty" style="padding:60px 20px">${tasksWho === 'mine' ? 'У вас задач нет' : 'Запланированных задач нет'}</div>`;
@@ -2430,6 +2437,44 @@ async function renderTasks() {
     if (!r.dataset.conv) { if (r.dataset.link) window.open(r.dataset.link, '_blank', 'noopener'); return; }
     // карточка открывается поверх задач: закрыл — и ты снова в списке
     openConv(Number(r.dataset.conv), true);
+  });
+  $$('#tk [data-cdone]').forEach((b) => b.onclick = async () => {
+    b.disabled = true;
+    try {
+      await api(`/api/conversations/${b.dataset.cdone}/call-due`, { method: 'POST', body: JSON.stringify({ done: true }) });
+      toast('Звонок отмечен выполненным ✓');
+      renderTasks();
+    } catch (e) { b.disabled = false; toast(e.message, true); }
+  });
+  // перенос: поле даты прямо в строке, выбрал — сохранилось
+  $$('#tk [data-cmove]').forEach((b) => b.onclick = () => {
+    const inp = document.createElement('input');
+    inp.type = 'datetime-local';
+    const d = new Date(Date.now() + 36e5); d.setMinutes(0, 0, 0);
+    inp.value = new Date(d.getTime() - d.getTimezoneOffset() * 6e4).toISOString().slice(0, 16);
+    inp.className = 'tk-move';
+    b.replaceWith(inp);
+    inp.focus();
+    inp.onchange = async () => {
+      if (!inp.value) return;
+      try {
+        await api(`/api/conversations/${b.dataset.cmove}/call-due`, { method: 'POST', body: JSON.stringify({ at: new Date(inp.value).toISOString() }) });
+        toast('Срок звонка перенесён');
+        renderTasks();
+      } catch (e) { toast(e.message, true); }
+    };
+  });
+  $$('#tk [data-late]').forEach((b) => b.onclick = async () => {
+    const mine = tasksWho === 'mine';
+    const q = b.dataset.late === 'done'
+      ? `Отметить выполненными все просроченные звонки и задачи${mine ? ' (ваши)' : ''}?`
+      : `Перенести все просроченные звонки и задачи${mine ? ' (ваши)' : ''} на сегодня?`;
+    if (!confirm(q)) return;
+    try {
+      const r = await api('/api/tasks/overdue', { method: 'POST', body: JSON.stringify({ action: b.dataset.late, mine }) });
+      toast(`${b.dataset.late === 'done' ? 'Отмечено' : 'Перенесено'}: ${r.count}`);
+      renderTasks();
+    } catch (e) { toast(e.message, true); }
   });
   $$('#tk [data-gdone]').forEach((b) => b.onclick = async () => {
     b.disabled = true;
