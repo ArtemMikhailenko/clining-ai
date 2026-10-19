@@ -1462,11 +1462,19 @@ async function send(root) {
   const t = inp.value.trim();
   if (!t) return;
   btn.disabled = true;
+  // Поле очищаем сразу. Пока запрос шёл, приходило новое сообщение и чат
+  // перерисовывался: openConv переносил ещё не очищенный текст в новое поле,
+  // а inp.value = '' потом чистил уже старое, невидимое — текст оставался в строке.
+  const keepAi = root.querySelector('[data-r="keep"]').checked;
+  inp.value = ''; inp.style.height = '';
   try {
-    await api(`/api/conversations/${current}/send`, { method: 'POST',
-      body: JSON.stringify({ text: t, keep_ai: root.querySelector('[data-r="keep"]').checked }) });
-    inp.value = '';
-  } catch (e) { toast('Не отправилось: ' + e.message, true); }
+    await api(`/api/conversations/${current}/send`, { method: 'POST', body: JSON.stringify({ text: t, keep_ai: keepAi }) });
+  } catch (e) {
+    toast('Не отправилось: ' + e.message, true);
+    // вернуть текст в то поле, которое сейчас на экране
+    const now = (drawerOpen ? $('#drawer-chat') : $('#inbox-chat'))?.querySelector('[data-r="inp"]') || inp;
+    if (!now.value) now.value = t;
+  }
   btn.disabled = false;
   openConv(current, drawerOpen);
 }
@@ -1545,7 +1553,7 @@ function nextHtml(c) {
     const own = n.kind === 'task' || (n.kind === 'bot' && c.followup_at);
     return `<div class="na-cur ${late ? 'late' : ''} ${n.kind}"><div><b dir="auto">${esc(n.what)}</b>
         <span>${[when, n.who].filter(Boolean).join(' · ')}${late ? ' · просрочено' : ''}${n.kind === 'call' ? ' · закроется, когда запишете звонок' : ''}</span></div>
-        ${own ? `<div class="na-acts"><button class="btn sm" data-a="next-done">Сделано</button>
+        ${own ? `<div class="na-acts"><button class="btn sm mark-done" data-a="next-done" title="Задача выполнена — убрать из списка">○ Отметить выполненной</button>
           <button class="btn ghost sm" data-a="next-clear" title="Убрать">✕</button></div>` : ''}</div>`;
   };
   return `<div class="sect note nextbox"><h4>Следующее действие</h4>
@@ -2412,8 +2420,8 @@ async function renderTasks() {
           <small>${t.kind === 'google' ? `заведено в Google Календаре${t.district ? ' · <bdi>' + esc(t.district) + '</bdi>' : ''}`
             : `<bdi>${esc(t.name || '+' + t.phone)}</bdi>${t.name ? ' · +' + esc(t.phone) : ''}${t.district ? ' · <bdi>' + esc(t.district) + '</bdi>' : ''} · ${esc(stage(t))}`}</small></span>
         <span class="tk-who">${esc(t.who || '—')}</span>
-        <span class="tk-act">${t.kind === 'task' ? `<button class="btn sm" data-done="${t.conv_id}">Сделано</button>`
-          : t.kind === 'google' ? `<button class="btn sm" data-gdone="${esc(t.event_id)}">Сделано</button>` : ''}</span>
+        <span class="tk-act">${t.kind === 'task' ? `<button class="btn sm mark-done" data-done="${t.conv_id}" title="Задача выполнена — убрать из списка">○ Отметить выполненной</button>`
+          : t.kind === 'google' ? `<button class="btn sm mark-done" data-gdone="${esc(t.event_id)}" title="Событие выполнено — убрать из списка">○ Отметить выполненной</button>` : ''}</span>
       </div>`).join('')}</div></section>`).join('')
     : `<div class="empty" style="padding:60px 20px">${tasksWho === 'mine' ? 'У вас задач нет' : 'Запланированных задач нет'}</div>`;
 
@@ -2434,7 +2442,7 @@ async function renderTasks() {
   $$('#tk [data-done]').forEach((b) => b.onclick = async () => {
     try {
       await api(`/api/conversations/${b.dataset.done}/next`, { method: 'POST', body: JSON.stringify({ done: true }) });
-      toast('Отмечено. Не забудьте задать следующее действие в карточке');
+      toast('Задача выполнена ✓ Не забудьте задать следующее действие в карточке');
       renderTasks();
     } catch (e) { toast(e.message, true); }
   });
