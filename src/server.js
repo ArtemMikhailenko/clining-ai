@@ -94,7 +94,9 @@ app.use((req, res, next) => {
   if (w) {
     const conv = getConversation(Number(w[1]));
     // менять заявку может только тот, кто взял её в работу
-    if (conv && conv.manager_id !== u.id) {
+    // заметка по свободной заявке (или открытой после просрочки) — не отказ, а «взять в работу»: route ниже
+    const freeNote = w[2] === 'note' && conv && (!conv.manager_id || conv.open_at);
+    if (conv && conv.manager_id !== u.id && !freeNote) {
       const who = getManager(conv.manager_id)?.name;
       return res.status(403).json({ take: true, error: !conv.manager_id ? 'Сначала нажмите «Взять в работу»'
         : conv.open_at ? `Заявку ведёт ${who}, но она просрочена — нажмите «Взять в работу», чтобы забрать её`
@@ -569,9 +571,20 @@ app.post('/api/conversations/:id/lead', (req, res) => {
 
 /** Внутренняя заметка менеджера — клиенту не уходит. */
 app.post('/api/conversations/:id/note', (req, res) => {
-  db.prepare('UPDATE conversations SET note=? WHERE id=?').run(String(req.body.note ?? ''), Number(req.params.id));
+  const id = Number(req.params.id);
+  const conv = getConversation(id);
+  if (!conv) return res.sendStatus(404);
+  // Менеджер пишет заметку по свободной заявке — значит, он её и ведёт: берём в работу сразу,
+  // чтобы не нажимать «Взять в работу» отдельно
+  let taken = false;
+  const u = req.user;
+  if (u?.id && conv.manager_id !== u.id && (!conv.manager_id || conv.open_at) && String(req.body.note ?? '').trim()) {
+    try { takeLead(id, u); taken = true; }
+    catch (e) { if (u.role !== 'owner') return res.status(403).json({ error: e.message }); }
+  }
+  db.prepare('UPDATE conversations SET note=? WHERE id=?').run(String(req.body.note ?? ''), id);
   emit('conversations', null);
-  res.json({ ok: true });
+  res.json({ ok: true, taken });
 });
 
 /**

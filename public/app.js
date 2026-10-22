@@ -2039,10 +2039,27 @@ function bindLead(root, convId) {
     } catch (e) { toast(e.message, true); }
   };
   const ta = root.querySelector('[data-r="note"]');
-  if (ta) ta.onblur = async () => {
-    await api(`/api/conversations/${convId}/note`, { method: 'POST', body: JSON.stringify({ note: ta.value }) });
-    toast('Заметка сохранена');
-  };
+  if (ta) {
+    // Заметка сохраняется сама: через секунду после ввода, при уходе с поля и при закрытии
+    // карточки. Раньше — только при потере фокуса: карточку перерисовывало новое сообщение
+    // или её закрывали «назад» на телефоне, и набранный текст пропадал без следа
+    let timer = null, saved = ta.value;
+    const save = async () => {
+      clearTimeout(timer);
+      if (ta.value === saved) return;
+      const v = ta.value;
+      try {
+        const r = await api(`/api/conversations/${convId}/note`, { method: 'POST', body: JSON.stringify({ note: v }) });
+        saved = v;
+        if (noteDraft?.id === convId && noteDraft.value === v) noteDraft = null;
+        toast(r?.taken ? 'Заметка сохранена — заявка взята в работу' : 'Заметка сохранена');
+        if (r?.taken) loadList();
+      } catch (e) { toast('Заметка не сохранилась: ' + e.message, true); }
+    };
+    ta.oninput = () => { noteDraft = { id: convId, value: ta.value }; clearTimeout(timer); timer = setTimeout(save, 1200); };
+    ta.onblur = save;
+    ta._flush = save;
+  }
   // заметка — это история разговора, а не одна фраза: новая запись ложится сверху с датой
   const addNote = root.querySelector('[data-a="note-add"]');
   if (addNote) addNote.onclick = () => {
@@ -2104,6 +2121,9 @@ async function openConv(id, inDrawer) {
   const atBottom = !wrap0 || wrap0.scrollHeight - wrap0.scrollTop - wrap0.clientHeight < 60;
   const prevTop = wrap0?.scrollTop ?? 0;
 
+  // несохранённая заметка переживает перерисовку карточки
+  const nd = noteDraft && noteDraft.id === id ? noteDraft : null;
+  const noteFocus = document.activeElement?.dataset?.r === 'note';
   current = id;
   detail = await api('/api/conversations/' + id);
   api('/api/conversations/' + id + '/read', { method: 'POST' }).catch(() => {});
@@ -2122,6 +2142,12 @@ async function openConv(id, inDrawer) {
     bindLead($('#inbox-lead'), id);
     $('#inbox-chat [data-a="card"]')?.addEventListener('click', () => openConv(id, true));
   }
+  const nt = (inDrawer ? $('#drawer-lead') : $('#inbox-lead'))?.querySelector('[data-r="note"]');
+  if (nd && nt) {
+    nt.value = nd.value;
+    nt.dispatchEvent(new Event('input'));
+    if (noteFocus) { nt.focus(); nt.setSelectionRange(nt.value.length, nt.value.length); }
+  }
   const root = inDrawer ? $('#drawer-chat') : $('#inbox-chat');
   const inp = root?.querySelector('[data-r="inp"]');
   if (inp && draft) { inp.value = draft; inp.style.height = Math.min(inp.scrollHeight, 140) + 'px'; }
@@ -2131,7 +2157,11 @@ async function openConv(id, inDrawer) {
 
   PAGES[page].render();
 }
+let noteDraft = null;   // { id, value } — заметка, которую ещё не успели сохранить
+// ушли со страницы или свернули приложение — дописанная заметка сохраняется
+document.addEventListener('visibilitychange', () => { if (document.hidden) $$('[data-r="note"]').forEach((t) => t._flush?.()); });
 function closeDrawer() {
+  $$('#drawer [data-r="note"]').forEach((t) => t._flush?.());
   drawerOpen = false;
   showLead(false);
   $('#drawer').classList.remove('on'); $('#scrim').classList.remove('on');
