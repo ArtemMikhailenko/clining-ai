@@ -147,6 +147,10 @@ function columnOf(c) {
 }
 // этапы ТЗ под колонками — для истории, списков и задач
 const STAGE_T = { new: 'Новая', clarify: 'Уточнение', offer: 'Предложение отправлено', agreed: 'Согласовано', done: 'Выполнено' };
+// Порядок в колонке и в списке: сначала непрочитанные, дальше — по последнему сообщению
+// клиента (а не по нашему ответу): ответивший через неделю клиент поднимается наверх
+const lastClient = (c) => String(c.last_in_at || c.last_at || '');
+const byLastClient = (a, b) => (b.unread > 0) - (a.unread > 0) || lastClient(b).localeCompare(lastClient(a));
 const colTitle = (k) => (ALL_COLS.find((x) => x.k === k) || { t: STAGE_T[k] || k }).t;
 
 // Чьи заявки показывать: '' — все, 'mine', 'none' — без ответственного, или id менеджера
@@ -636,7 +640,7 @@ const iso = (d) => new Intl.DateTimeFormat('sv-SE').format(d);
 const WEEK_START = 0;
 const HOUR_PX = 48;
 const CAL_LAYERS = [
-  { k: 'job', t: 'Заказы', c: 'var(--s3)' },
+  { k: 'job', t: 'Уборки', c: 'var(--s3)' },
   { k: 'call', t: 'Звонки', c: 'var(--s1)' },
   { k: 'task', t: 'Задачи', c: 'var(--s2)' },
   { k: 'wish', t: 'Хотят, но не записаны', c: 'var(--s4)' },
@@ -650,13 +654,17 @@ let calView = stored('calView', matchMedia('(max-width:860px)').matches ? 'day' 
 let calDate = iso(new Date());
 let calMini = calDate.slice(0, 7);
 let calWho = stored('calWho', '');
-let calLayers = (() => { const d = { job: 1, wish: 1, call: 1, task: 1, follow: 1, bot: 0, google: 1 };
-  try { return { ...d, ...JSON.parse(stored('calLayers', '{}')) }; } catch { return d; } })();
+// «Хотят, но не записаны» — день, который клиент назвал боту, а не задача: висел «на весь
+// день» вверху недели и путал. Скрыт по умолчанию, включается галочкой слева
+let calLayers = (() => { const d = { job: 1, wish: 0, call: 1, task: 1, follow: 1, bot: 0, google: 1 };
+  let v = d;
+  try { v = { ...d, ...JSON.parse(stored('calLayers', '{}')) }; } catch {}
+  if (stored('calLayersV', '') !== '2') { v.wish = 0; store('calLayers', v); store('calLayersV', '2'); }
+  return v; })();
 let calData = { events: [], holidays: [] };
 // Быстрый выбор того, что показывать, — те же галочки слева, только в один клик
 const CAL_PRESETS = {
-  all: { t: 'Всё', on: ['job', 'wish', 'call', 'task', 'follow', 'google'] },
-  jobs: { t: 'Заказы', on: ['job', 'wish'] },
+  jobs: { t: 'Уборки', on: ['job'] },
   tasks: { t: 'Задачи', on: ['call', 'task', 'follow', 'google'] }
 };
 function calPreset() {
@@ -1160,7 +1168,6 @@ function renderFunnel() {
   box.innerHTML = `<div class="fbar">${bar}</div>`
   + flagRow('late', 'Звонок просрочен', lateN, 'var(--danger)', lateN > 0, 'danger')
   + flagRow('call', 'Позвонить', callN, 'var(--s1)', false)
-  + flagRow('red', 'Красные флаги', redN, 'var(--danger)', false)
   + flagRow('need', 'Нужен менеджер', needN, 'var(--warn)', needN > 0)
   + (reviewN ? flagRow('review', 'Проверить после переноса', reviewN, 'var(--s5)', false) : '')
   + '<div class="fsep"></div>'
@@ -1198,7 +1205,7 @@ function renderBoard() {
   const by = Object.fromEntries(ALL_COLS.map((x) => [x.k, []]));
   rows.forEach((c) => by[columnOf(c)].push(c));
   // как в мессенджере: сверху тот, кто писал последним
-  for (const k of Object.keys(by)) by[k].sort((a, b) => String(b.last_at).localeCompare(String(a.last_at)));
+  for (const k of Object.keys(by)) by[k].sort(byLastClient);
   subLine(rows.length);
   renderHeaderStats();
 
@@ -1269,6 +1276,7 @@ function renderLeads() {
   const rows = convs.filter(matches);
   const by = Object.fromEntries(ALL_COLS.map((x) => [x.k, []]));
   rows.forEach((c) => by[columnOf(c)].push(c));
+  for (const k of Object.keys(by)) by[k].sort(byLastClient);
   subLine(rows.length);
   renderHeaderStats();
 
@@ -1810,7 +1818,7 @@ function callHtml(c) {
       `<option value="${m.id}" ${c.manager_id === m.id ? 'selected' : ''}>${esc(m.name)}${m.active ? '' : ' (не принимает)'}</option>`).join('')}
       ${c.manager_id && !ms.some((m) => m.id === c.manager_id) ? '<option selected>удалён</option>' : ''}</select></dd></div>
     ${c.assigned_at ? `<div class="kv"><dt>${c.handoff_due_at ? 'Передано' : 'Назначено'}</dt><dd>${dayTime(c.assigned_at)}</dd></div>` : ''}
-    ${cs ? `<div class="kv due"><dt>Позвонить до</dt><dd>${dayTime(c.call_due_at)}${cs === 'late' ? ` <span class="late-tag">просрочено ${lateBy(c.call_due_at)}</span>` : ''}</dd></div>` : ''}
+    ${''}
     <div class="call-acts"><button class="btn sm ${cs ? 'primary' : ''}" data-a="call">Записать звонок</button></div>
     <form class="callf" data-r="callf" hidden>
       <div class="cf-row"><label>Итог</label><select name="status">${Object.entries(st).map(([k, t]) =>

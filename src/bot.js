@@ -140,6 +140,24 @@ function workableDay(iso) {
   return Array.isArray(workHours()[day]);
 }
 
+const STAFF_RE = /ваканс|резюме|трудоустр|ищет работу|ищут работу|ищу работу|подработ|устроиться на работу|משרה|מחפש עבודה|מחפשת עבודה|vacanc|looking for (a )?job/i;
+
+/** Один раз: открытые заявки людей, которые ищут работу, — в «Сотрудники». */
+function moveJobSeekers() {
+  if (getSetting('staff_fix_2026_10_22')) return;
+  let n = 0;
+  for (const c of db.prepare(`SELECT id, summary, handoff_reason FROM conversations WHERE status != 'closed' AND deleted_at IS NULL
+      AND stage IN ('new', 'clarify') AND paid_sum IS NULL`).all()) {
+    if (!STAFF_RE.test(`${c.summary || ''} ${c.handoff_reason || ''}`)) continue;
+    applyStage(c.id, 'closed', { close: 'unq_staff', actor: 'бот', why: 'ищет работу (по сути заявки)' });
+    db.prepare('UPDATE conversations SET handoff_reason=NULL, needs_human=0, nudge_stop=1, followup_at=NULL WHERE id=?').run(c.id);
+    n++;
+  }
+  db.prepare("INSERT INTO settings(key, value) VALUES('staff_fix_2026_10_22', '1') ON CONFLICT(key) DO UPDATE SET value='1'").run();
+  if (n) console.log(`[сотрудники] ищущих работу перенесено в «Сотрудники»: ${n}`);
+}
+setTimeout(() => { try { moveJobSeekers(); } catch (e) { console.error('перенос ищущих работу:', e.message); } }, 5000).unref?.();
+
 function flagHuman(convId, reason) {
   // ai_enabled=0 обязательно: иначе бот молчит (status=human), а интерфейс
   // показывает «Перехватить», и вернуть ИИ нечем
@@ -445,7 +463,9 @@ async function respond(convId, ch, text) {
   // Заявка не наша: бытовая уборка или человек ищет работу. Такие не должны
   // висеть в очереди «нужен человек» — менеджеру там ловить нечего. Ответ
   // клиенту всё равно уйдёт, а диалог сразу ложится в свою корзину архива.
-  const bucket = routeBucket(out.route);
+  // Модель иногда понимает, что человек ищет работу («интересуется вакансией» в сути),
+  // но route не ставит — и такой «клиент» висел на доске. Страхуемся по сути заявки
+  const bucket = routeBucket(out.route) || (STAFF_RE.test(`${out.summary || ''} ${out.handoff_reason || ''}`) ? 'staff' : '');
   const stageNow = getConversation(conv.id)?.stage || 'new';
   if (bucket) {
     applyStage(conv.id, 'closed', { close: bucket === 'staff' ? 'unq_staff' : 'unq_regular', actor: 'бот', why: out.route });
