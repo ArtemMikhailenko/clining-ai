@@ -16,6 +16,9 @@ import fs from 'node:fs';
 import { saveMedia } from '../media.js';
 import { setMessageStatus } from '../db.js';
 
+/** Обещание с пределом по времени: зависший вызов WhatsApp не должен держать код вечно. */
+const capped = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('TIMEOUT')), ms).unref?.())]);
+
 let sock = null;
 let onMessage = null;
 // SELF_TEST=1 — бот отвечает в чате «Сообщение себе», чтобы можно было
@@ -348,12 +351,18 @@ export const baileys = {
     // «печатает…» и пауза по длине текста: мгновенный ответ в миллисекунду —
     // ровно тот роботизированный паттерн, по которому ловит антиспам
     try {
-      await sock.presenceSubscribe(jid);
-      await sock.sendPresenceUpdate('composing', jid);
+      await capped(sock.presenceSubscribe(jid), 5000);
+      await capped(sock.sendPresenceUpdate('composing', jid), 5000);
       await new Promise((r) => setTimeout(r, Math.min(1200 + text.length * 25, 6000)));
-      await sock.sendPresenceUpdate('paused', jid);
+      await capped(sock.sendPresenceUpdate('paused', jid), 5000);
     } catch {}
-    const res = await sock.sendMessage(jid, { text });
+    // Бывало, что сообщение уже доставлено, а sendMessage так и не возвращался: код ждал
+    // вечно, напоминание не записывалось, и через 10 минут тот же клиент получал его снова.
+    // Не дождались за 30 секунд — считаем отправленным без подтверждения, повторно не шлём
+    const res = await capped(sock.sendMessage(jid, { text }), 30000).catch((e) => {
+      if (e.message === 'TIMEOUT') { console.error('WhatsApp не подтвердил отправку за 30 с:', jid); return { unconfirmed: true }; }
+      throw e;
+    });
     if (res?.key?.id) sentIds.add(res.key.id);              // чтобы не зациклиться в чате с собой
     return { wa_id: res?.key?.id ?? null };
   },

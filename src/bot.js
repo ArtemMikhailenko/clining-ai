@@ -566,6 +566,8 @@ async function sendInitiative(conv, kind, extra = {}) {
   const out = await generateReply(conv, history(conv.id), { nudge: { kind, ...extra } });
   const text = (out.replies ?? [])[0];
   if (!text) return false;
+  // «писали» — до отправки: даже если отправка зависнет или упадёт, второй раз в эти сутки не напишем
+  db.prepare("UPDATE conversations SET last_nudge_at = datetime('now') WHERE id=?").run(conv.id);
   try {
     const wa = (await adapterFor(conv).send(conv, text)).wa_id;
     const msg = addMessage(conv.id, { direction: 'out', author: 'ai', body: text, wa_id: wa, kind });
@@ -581,7 +583,16 @@ async function sendInitiative(conv, kind, extra = {}) {
   }
 }
 
+// Проход рассылки не накладывается на предыдущий: если он завис на отправке, новый
+// стартовал через 10 минут и писал тем же клиентам ещё раз
+let followBusy = false;
 export async function runFollowUps() {
+  if (followBusy) return;
+  followBusy = true;
+  try { await runFollowUpsOnce(); } finally { followBusy = false; }
+}
+
+async function runFollowUpsOnce() {
   if (getSetting('ai_global') !== '1') return;
   const tz = scheduleSetting('timezone');
   const today = todayLocal();
